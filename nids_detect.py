@@ -230,6 +230,19 @@ class IntrusionDetector:
             for feature in self.selected_features:
                 features[feature] = 0
             
+            float_columns = [
+        'Flow Duration', 'Flow Bytes/s', 'Flow Packets/s', 
+        'Fwd Packets/s', 'Bwd Packets/s', 'Average Packet Size',
+        'Avg Bwd Segment Size', 'Bwd Packet Length Mean', 'Bwd Packet Length Max',
+        'Bwd Packet Length Std', 'Packet Length Mean', 'Packet Length Variance',
+        'Packet Length Std', 'Max Packet Length', 'Flow IAT Std',
+        'Fwd IAT Std', 'Fwd IAT Max', 'act_data_pkt_fwd'
+    ]
+            # Initialize float columns with dtype=float64
+            for col in float_columns:
+                features[col] = pd.Series(0.0, index=df.index, dtype='float64')
+            
+            
             # Feature mapping between eve.json and CICIDS2017
             feature_mapping = {
                 'Flow ID': 'flow_id',
