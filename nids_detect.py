@@ -122,7 +122,7 @@ class IntrusionDetector:
             self.metadata = {}
     
     def process_eve_json(self):
-        """_
+        """
         Process the entire Eve JSON file for analysis.
         
         Returns:
@@ -135,11 +135,23 @@ class IntrusionDetector:
         with open(self.eve_json_path, 'r') as f:
             for line in f:
                 try:
+                    # Parse the JSON object
                     record = json.loads(line)
-                    # Skip records with event_type = "alert" (existing Suricata alerts)
-                    if record.get('event_type') == 'alert':
-                        continue
-                    data.append(record)
+                    
+                    # Extract the Suricata event data from the nested structure
+                    if 'suricata' in record and 'eve' in record['suricata']:
+                        event_data = record['suricata']['eve']
+                        
+                        # Skip records with event_type = "alert" (existing Suricata alerts)
+                        if event_data.get('event_type') == 'alert':
+                            continue
+                        
+                        data.append(event_data)
+                    else:
+                        # Try the old format as fallback
+                        if 'event_type' in record and record.get('event_type') != 'alert':
+                            data.append(record)
+                        
                 except json.JSONDecodeError:
                     print(f"Error parsing JSON line: {line[:50]}...")
                     continue
@@ -167,11 +179,23 @@ class IntrusionDetector:
             new_records = []
             for line in f:
                 try:
+                    # Parse the JSON object
                     record = json.loads(line)
-                    # Skip records with event_type = "alert" (existing Suricata alerts)
-                    if record.get('event_type') == 'alert':
-                        continue
-                    new_records.append(record)
+                    
+                    # Extract the Suricata event data from the nested structure
+                    if 'suricata' in record and 'eve' in record['suricata']:
+                        event_data = record['suricata']['eve']
+                        
+                        # Skip records with event_type = "alert" (existing Suricata alerts)
+                        if event_data.get('event_type') == 'alert':
+                            continue
+                        
+                        new_records.append(event_data)
+                    else:
+                        # Try the old format as fallback
+                        if 'event_type' in record and record.get('event_type') != 'alert':
+                            new_records.append(record)
+                        
                 except json.JSONDecodeError:
                     print(f"Error parsing JSON line: {line[:50]}...")
                     continue

@@ -546,8 +546,18 @@ def read_eve_json(eve_json_path):
     with open(eve_json_path, 'r') as f:
         for line in f:
             try:
+                # Parse the JSON object
                 record = json.loads(line)
-                data.append(record)
+                
+                # Check if this is the new format (with 'suricata.eve' nesting)
+                if 'suricata' in record and 'eve' in record['suricata']:
+                    event_data = record['suricata']['eve']
+                    data.append(event_data)
+                else:
+                    # Try the old format as fallback
+                    if 'event_type' in record:
+                        data.append(record)
+                    
             except json.JSONDecodeError:
                 print(f"Error parsing JSON line: {line[:50]}...")
                 continue

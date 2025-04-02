@@ -1,0 +1,111 @@
+{
+    "Source Port": {
+        "mean": 27813.077632107255,
+        "std": 21179.744801387988,
+        "min": 0.0,
+        "max": 65531.0,
+        "q1": 7589.0,
+        "median": 27291.0,
+        "q3": 46281.0,
+        "iqr": 38692.0
+    },
+    "Destination Port": {
+        "mean": 7247.276225058045,
+        "std": 16237.72297890689,
+        "min": 0.0,
+        "max": 65531.0,
+        "q1": 53.0,
+        "median": 53.0,
+        "q3": 443.0,
+        "iqr": 390.0
+    },
+    "Flow Duration": {
+        "mean": 5.216119965783915,
+        "std": 176.82882821991205,
+        "min": 0.0,
+        "max": 15341.0,
+        "q1": 0.0,
+        "median": 0.0,
+        "q3": 0.0,
+        "iqr": 0.0
+    },
+    "Total Fwd Packets": {
+        "mean": 5.552624687952796,
+        "std": 297.32929608830136,
+        "min": 0.0,
+        "max": 35475.0,
+        "q1": 0.0,
+        "median": 0.0,
+        "q3": 0.0,
+        "iqr": 0.0
+    },
+    "Total Backward Packets": {
+        "mean": 9.440898695948187,
+        "std": 514.9416646875532,
+        "min": 0.0,
+        "max": 70628.0,
+        "q1": 0.0,
+        "median": 0.0,
+        "q3": 0.0,
+        "iqr": 0.0
+    },
+    "Total Length of Fwd Packets": {
+        "mean": 445.411780109282,
+        "std": 19301.602624121228,
+        "min": 0.0,
+        "max": 2445660.0,
+        "q1": 0.0,
+        "median": 0.0,
+        "q3": 0.0,
+        "iqr": 0.0
+    },
+    "Total Length of Bwd Packets": {
+        "mean": 11443.09540352286,
+        "std": 724656.2494521178,
+        "min": 0.0,
+        "max": 105439403.0,
+        "q1": 0.0,
+        "median": 0.0,
+        "q3": 0.0,
+        "iqr": 0.0
+    },
+    "Flow Bytes/s": {
+        "mean": 11888.507183632142,
+        "std": 742082.0556116762,
+        "min": 0.0,
+        "max": 107885063.0,
+        "q1": 0.0,
+        "median": 0.0,
+        "q3": 0.0,
+        "iqr": 0.0
+    },
+    "Flow Packets/s": {
+        "mean": 14.993523383900984,
+        "std": 805.3480708463267,
+        "min": 0.0,
+        "max": 106103.0,
+        "q1": 0.0,
+        "median": 0.0,
+        "q3": 0.0,
+        "iqr": 0.0
+    },
+    "metadata": {
+        "timestamp": "2025-04-02T16:11:33.338984",
+        "num_samples": 57283,
+        "features": [
+            "Flow ID",
+            "Source IP",
+            "Source Port",
+            "Destination IP",
+            "Destination Port",
+            "Protocol",
+            "Flow Duration",
+            "Total Fwd Packets",
+            "Total Backward Packets",
+            "Total Length of Fwd Packets",
+            "Total Length of Bwd Packets",
+            "Flow Bytes/s",
+            "Flow Packets/s"
+        ]
+    }
+}
