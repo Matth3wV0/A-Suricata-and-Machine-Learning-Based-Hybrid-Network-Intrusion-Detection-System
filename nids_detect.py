@@ -747,7 +747,7 @@ class IntrusionDetector:
         self.report_alerts(combined_results, original_df)
         
         # Print summary
-        # self.print_summary()
+        self.print_summary()
     
     def report_alerts(self, results, original_df):
         """
@@ -818,8 +818,7 @@ class IntrusionDetector:
             # print("Original JSON:", json.dumps(original.to_dict(), indent=2))
         
         print("\n" + "="*80)
-        
-        self.print_summary()
+        # self.print_summary()
     
     def print_summary(self):
         """
