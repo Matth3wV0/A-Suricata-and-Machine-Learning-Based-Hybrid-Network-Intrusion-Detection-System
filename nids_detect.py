@@ -83,7 +83,6 @@ class IntrusionDetector:
         
         # Load classification model
         model_path = os.path.join(self.model_dir, 'model.pkl')
-        print(model_path)
         if os.path.exists(model_path):
             with open(model_path, 'rb') as f:
                 self.clf_model = pickle.load(f)
@@ -586,7 +585,7 @@ class IntrusionDetector:
         self.report_alerts(combined_results, original_df)
         
         # Print summary
-        self.print_summary()
+        # self.print_summary()
     
     def report_alerts(self, results, original_df):
         """
