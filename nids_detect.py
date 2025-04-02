@@ -213,351 +213,191 @@ class IntrusionDetector:
             self.analyze_flows(features, df)
         
     def extract_features(self, df):
-            """
-            Extract and transform features from Eve JSON records to match model features.
-            
-            Args:
-                df: DataFrame with parsed Eve JSON records
-                
-            Returns:
-                DataFrame with extracted features matching the model's expected features
-            """
-            # Initialize an empty DataFrame to store the extracted features
-            features = pd.DataFrame(index=df.index)
-            
-            # Create placeholder for all the features in selected_features
-            # to ensure feature order matches the training data
-            for feature in self.selected_features:
-                features[feature] = 0
-            
-            float_columns = [
-        'Flow Duration', 'Flow Bytes/s', 'Flow Packets/s', 
-        'Fwd Packets/s', 'Bwd Packets/s', 'Average Packet Size',
-        'Avg Bwd Segment Size', 'Bwd Packet Length Mean', 'Bwd Packet Length Max',
-        'Bwd Packet Length Std', 'Packet Length Mean', 'Packet Length Variance',
-        'Packet Length Std', 'Max Packet Length', 'Flow IAT Std',
-        'Fwd IAT Std', 'Fwd IAT Max', 'act_data_pkt_fwd'
-    ]
-            # Initialize float columns with dtype=float64
-            for col in float_columns:
-                features[col] = pd.Series(0.0, index=df.index, dtype='float64')
-            
-            
-            # Feature mapping between eve.json and CICIDS2017
-            feature_mapping = {
-                'Flow ID': 'flow_id',
-                'Source IP': 'src_ip',
-                'Source Port': 'src_port',
-                'Destination IP': 'dest_ip',
-                'Destination Port': 'dest_port',
-                'Protocol': 'proto'
-            }
-            
-            # Map direct fields
-            for target_field, source_field in feature_mapping.items():
-                if source_field in df.columns and target_field in features.columns:
-                    features[target_field] = df[source_field]
-            
-            # Extract flow information
-            for idx, row in df.iterrows():
-                # Parse timestamp if available
-                if 'timestamp' in row:
-                    try:
-                        # Convert timestamp to datetime
-                        timestamp = pd.to_datetime(row['timestamp'])
-                        # Extract components if needed for the model
-                        if 'Year' in features.columns:
-                            features.at[idx, 'Year'] = timestamp.year
-                        if 'Month' in features.columns:
-                            features.at[idx, 'Month'] = timestamp.month
-                        if 'Day' in features.columns:
-                            features.at[idx, 'Day'] = timestamp.day
-                        if 'Hour' in features.columns:
-                            features.at[idx, 'Hour'] = timestamp.hour
-                        if 'Minute' in features.columns:
-                            features.at[idx, 'Minute'] = timestamp.minute
-                        if 'Second' in features.columns:
-                            features.at[idx, 'Second'] = timestamp.second
-                    except (ValueError, TypeError):
-                        pass
-                
-                # Check if 'flow' is in the record
-                if 'flow' in row and isinstance(row['flow'], dict):
-                    flow = row['flow']
-                    if 'Flow Duration' in features.columns:
-                        features.at[idx, 'Flow Duration'] = flow.get('age', 0)
-                    if 'Total Fwd Packets' in features.columns:
-                        features.at[idx, 'Total Fwd Packets'] = flow.get('pkts_toserver', 0)
-                    if 'Total Backward Packets' in features.columns:
-                        features.at[idx, 'Total Backward Packets'] = flow.get('pkts_toclient', 0)
-                    if 'Total Length of Fwd Packets' in features.columns:
-                        features.at[idx, 'Total Length of Fwd Packets'] = flow.get('bytes_toserver', 0)
-                    if 'Total Length of Bwd Packets' in features.columns:
-                        features.at[idx, 'Total Length of Bwd Packets'] = flow.get('bytes_toclient', 0)
-                    
-                    # Calculate derived metrics
-                    total_packets = flow.get('pkts_toserver', 0) + flow.get('pkts_toclient', 0)
-                    total_bytes = flow.get('bytes_toserver', 0) + flow.get('bytes_toclient', 0)
-                    
-                    # Average Packet Size
-                    if 'Average Packet Size' in features.columns:
-                        features.at[idx, 'Average Packet Size'] = total_bytes / total_packets if total_packets > 0 else 0
-                        
-                    # Forward and backward packet size calculations
-                    if flow.get('pkts_toserver', 0) > 0:
-                        avg_pkt_size_fwd = flow['bytes_toserver'] / flow['pkts_toserver']
-                    else:
-                        avg_pkt_size_fwd = 0
-                        
-                    if 'Avg Fwd Segment Size' in features.columns:
-                        features.at[idx, 'Avg Fwd Segment Size'] = avg_pkt_size_fwd
-                        
-                    if 'Fwd Packet Length Mean' in features.columns:
-                        features.at[idx, 'Fwd Packet Length Mean'] = avg_pkt_size_fwd
-                        
-                    if 'Fwd Packet Length Max' in features.columns:
-                        features.at[idx, 'Fwd Packet Length Max'] = avg_pkt_size_fwd * 1.5  # Estimation
-                        
-                    if 'Fwd Packet Length Min' in features.columns:
-                        features.at[idx, 'Fwd Packet Length Min'] = avg_pkt_size_fwd * 0.5  # Estimation
-                        
-                    if 'Fwd Packet Length Std' in features.columns:
-                        features.at[idx, 'Fwd Packet Length Std'] = avg_pkt_size_fwd * 0.2  # Estimation
-                    
-                    # Backward metrics
-                    if flow.get('pkts_toclient', 0) > 0:
-                        avg_pkt_size_bwd = flow['bytes_toclient'] / flow['pkts_toclient']
-                    else:
-                        avg_pkt_size_bwd = 0
-                        
-                    if 'Avg Bwd Segment Size' in features.columns:
-                        features.at[idx, 'Avg Bwd Segment Size'] = avg_pkt_size_bwd
-                        
-                    if 'Bwd Packet Length Mean' in features.columns:
-                        features.at[idx, 'Bwd Packet Length Mean'] = avg_pkt_size_bwd
-                        
-                    if 'Bwd Packet Length Max' in features.columns:
-                        features.at[idx, 'Bwd Packet Length Max'] = avg_pkt_size_bwd * 1.5  # Estimation
-                        
-                    if 'Bwd Packet Length Min' in features.columns:
-                        features.at[idx, 'Bwd Packet Length Min'] = avg_pkt_size_bwd * 0.5  # Estimation
-                        
-                    if 'Bwd Packet Length Std' in features.columns:
-                        features.at[idx, 'Bwd Packet Length Std'] = avg_pkt_size_bwd * 0.2  # Estimation
-                    
-                    # Overall packet metrics
-                    if total_packets > 0:
-                        avg_pkt_size = total_bytes / total_packets
-                    else:
-                        avg_pkt_size = 0
-                        
-                    if 'Packet Length Mean' in features.columns:
-                        features.at[idx, 'Packet Length Mean'] = avg_pkt_size
-                        
-                    if 'Packet Length Variance' in features.columns:
-                        features.at[idx, 'Packet Length Variance'] = (avg_pkt_size_fwd - avg_pkt_size_bwd)**2 if avg_pkt_size_bwd > 0 else 0
-                        
-                    if 'Packet Length Std' in features.columns:
-                        features.at[idx, 'Packet Length Std'] = np.sqrt(max(0, features.at[idx, 'Packet Length Variance'])) if 'Packet Length Variance' in features.columns else 0
-                        
-                    if 'Min Packet Length' in features.columns:
-                        features.at[idx, 'Min Packet Length'] = min(avg_pkt_size_fwd * 0.5, avg_pkt_size_bwd * 0.5) if avg_pkt_size_bwd > 0 else avg_pkt_size_fwd * 0.5
-                        
-                    if 'Max Packet Length' in features.columns:
-                        features.at[idx, 'Max Packet Length'] = max(avg_pkt_size_fwd * 1.5, avg_pkt_size_bwd * 1.5) if avg_pkt_size_bwd > 0 else avg_pkt_size_fwd * 1.5
-                    
-                    # Subflow features
-                    if 'Subflow Fwd Packets' in features.columns:
-                        features.at[idx, 'Subflow Fwd Packets'] = flow.get('pkts_toserver', 0)
-                        
-                    if 'Subflow Fwd Bytes' in features.columns:
-                        features.at[idx, 'Subflow Fwd Bytes'] = flow.get('bytes_toserver', 0)
-                        
-                    if 'Subflow Bwd Packets' in features.columns:
-                        features.at[idx, 'Subflow Bwd Packets'] = flow.get('pkts_toclient', 0)
-                        
-                    if 'Subflow Bwd Bytes' in features.columns:
-                        features.at[idx, 'Subflow Bwd Bytes'] = flow.get('bytes_toclient', 0)
-                    
-                    # Header length estimation (typical TCP/IP header is ~40 bytes)
-                    header_size = 40
-                    if 'Fwd Header Length' in features.columns:
-                        features.at[idx, 'Fwd Header Length'] = header_size * flow.get('pkts_toserver', 0)
-                        
-                    if 'Fwd Header Length.1' in features.columns:
-                        features.at[idx, 'Fwd Header Length.1'] = features.at[idx, 'Fwd Header Length'] if 'Fwd Header Length' in features.columns else 0
-                        
-                    if 'Bwd Header Length' in features.columns:
-                        features.at[idx, 'Bwd Header Length'] = header_size * flow.get('pkts_toclient', 0)
-                    
-                    # Flow rates
-                    duration = flow.get('age', 0)
-                    if duration > 0:
-                        if 'Flow Bytes/s' in features.columns:
-                            features.at[idx, 'Flow Bytes/s'] = total_bytes / duration
-                            
-                        if 'Flow Packets/s' in features.columns:
-                            features.at[idx, 'Flow Packets/s'] = total_packets / duration
-                            
-                        if 'Fwd Packets/s' in features.columns:
-                            features.at[idx, 'Fwd Packets/s'] = flow.get('pkts_toserver', 0) / duration
-                            
-                        if 'Bwd Packets/s' in features.columns:
-                            features.at[idx, 'Bwd Packets/s'] = flow.get('pkts_toclient', 0) / duration
-                    
-                    # Flow IAT (Inter-Arrival Time) statistics
-                    if duration > 0 and total_packets > 2:
-                        avg_iat = duration / (total_packets - 1)
-                        
-                        if 'Flow IAT Mean' in features.columns:
-                            features.at[idx, 'Flow IAT Mean'] = avg_iat
-                            
-                        if 'Flow IAT Std' in features.columns:
-                            features.at[idx, 'Flow IAT Std'] = avg_iat * 0.3  # Estimation
-                            
-                        if 'Flow IAT Max' in features.columns:
-                            features.at[idx, 'Flow IAT Max'] = avg_iat * 3  # Estimation
-                            
-                        if 'Flow IAT Min' in features.columns:
-                            features.at[idx, 'Flow IAT Min'] = avg_iat * 0.1  # Estimation
-                        
-                        # Forward IAT
-                        if flow.get('pkts_toserver', 0) > 1:
-                            fwd_avg_iat = duration / (flow.get('pkts_toserver', 0) - 1)
-                            
-                            if 'Fwd IAT Total' in features.columns:
-                                features.at[idx, 'Fwd IAT Total'] = duration
-                                
-                            if 'Fwd IAT Mean' in features.columns:
-                                features.at[idx, 'Fwd IAT Mean'] = fwd_avg_iat
-                                
-                            if 'Fwd IAT Std' in features.columns:
-                                features.at[idx, 'Fwd IAT Std'] = fwd_avg_iat * 0.3  # Estimation
-                                
-                            if 'Fwd IAT Max' in features.columns:
-                                features.at[idx, 'Fwd IAT Max'] = fwd_avg_iat * 3  # Estimation
-                                
-                            if 'Fwd IAT Min' in features.columns:
-                                features.at[idx, 'Fwd IAT Min'] = fwd_avg_iat * 0.1  # Estimation
-                        
-                        # Backward IAT
-                        if flow.get('pkts_toclient', 0) > 1:
-                            bwd_avg_iat = duration / (flow.get('pkts_toclient', 0) - 1)
-                            
-                            if 'Bwd IAT Total' in features.columns:
-                                features.at[idx, 'Bwd IAT Total'] = duration
-                                
-                            if 'Bwd IAT Mean' in features.columns:
-                                features.at[idx, 'Bwd IAT Mean'] = bwd_avg_iat
-                                
-                            if 'Bwd IAT Std' in features.columns:
-                                features.at[idx, 'Bwd IAT Std'] = bwd_avg_iat * 0.3  # Estimation
-                                
-                            if 'Bwd IAT Max' in features.columns:
-                                features.at[idx, 'Bwd IAT Max'] = bwd_avg_iat * 3  # Estimation
-                                
-                            if 'Bwd IAT Min' in features.columns:
-                                features.at[idx, 'Bwd IAT Min'] = bwd_avg_iat * 0.1  # Estimation
-                    
-                    # Activity metrics
-                    if 'Active Mean' in features.columns:
-                        features.at[idx, 'Active Mean'] = duration * 0.7  # Estimation
-                        
-                    if 'Active Std' in features.columns:
-                        features.at[idx, 'Active Std'] = duration * 0.2  # Estimation
-                        
-                    if 'Active Max' in features.columns:
-                        features.at[idx, 'Active Max'] = duration  # Estimation
-                        
-                    if 'Active Min' in features.columns:
-                        features.at[idx, 'Active Min'] = duration * 0.4  # Estimation
-                        
-                    if 'Idle Mean' in features.columns:
-                        features.at[idx, 'Idle Mean'] = duration * 0.3  # Estimation
-                        
-                    if 'Idle Std' in features.columns:
-                        features.at[idx, 'Idle Std'] = duration * 0.1  # Estimation
-                        
-                    if 'Idle Max' in features.columns:
-                        features.at[idx, 'Idle Max'] = duration * 0.5  # Estimation
-                        
-                    if 'Idle Min' in features.columns:
-                        features.at[idx, 'Idle Min'] = duration * 0.1  # Estimation
-                    
-                    # Additional metrics
-                    if 'act_data_pkt_fwd' in features.columns:
-                        features.at[idx, 'act_data_pkt_fwd'] = flow.get('pkts_toserver', 0) * 0.8  # Estimation
-                        
-                    if 'min_seg_size_forward' in features.columns:
-                        features.at[idx, 'min_seg_size_forward'] = avg_pkt_size_fwd * 0.5 if avg_pkt_size_fwd > 0 else 40  # Estimation
-                    
-                    # Init window bytes
-                    if 'Init_Win_bytes_forward' in features.columns:
-                        features.at[idx, 'Init_Win_bytes_forward'] = 65535  # Default window size
-                        
-                    if 'Init_Win_bytes_backward' in features.columns:
-                        features.at[idx, 'Init_Win_bytes_backward'] = 65535  # Default window size
-                
-                # Extract TCP information if available
-                if 'tcp' in row and isinstance(row['tcp'], dict):
-                    tcp = row['tcp']
-                    # Extract TCP flags
-                    if 'FIN Flag Count' in features.columns:
-                        features.at[idx, 'FIN Flag Count'] = 1 if tcp.get('fin', False) else 0
-                        
-                    if 'SYN Flag Count' in features.columns:
-                        features.at[idx, 'SYN Flag Count'] = 1 if tcp.get('syn', False) else 0
-                        
-                    if 'RST Flag Count' in features.columns:
-                        features.at[idx, 'RST Flag Count'] = 1 if tcp.get('rst', False) else 0
-                        
-                    if 'PSH Flag Count' in features.columns:
-                        features.at[idx, 'PSH Flag Count'] = 1 if tcp.get('psh', False) else 0
-                        
-                    if 'ACK Flag Count' in features.columns:
-                        features.at[idx, 'ACK Flag Count'] = 1 if tcp.get('ack', False) else 0
-                        
-                    if 'URG Flag Count' in features.columns:
-                        features.at[idx, 'URG Flag Count'] = 1 if tcp.get('urg', False) else 0
-                        
-                    if 'CWE Flag Count' in features.columns:
-                        features.at[idx, 'CWE Flag Count'] = 1 if tcp.get('cwe', False) else 0
-                        
-                    if 'ECE Flag Count' in features.columns:
-                        features.at[idx, 'ECE Flag Count'] = 1 if tcp.get('ece', False) else 0
-                    
-                    # Extract TCP window information
-                    if ('tcp_options' in tcp and isinstance(tcp['tcp_options'], list) and 
-                        'Init_Win_bytes_forward' in features.columns):
-                        for option in tcp['tcp_options']:
-                            if option.get('type') == 'window scale':
-                                features.at[idx, 'Init_Win_bytes_forward'] = option.get('value', 65535)
-                                break
-                
-                # Additional binary features that might be needed
-                if 'SimillarHTTP' in features.columns:
-                    features.at[idx, 'SimillarHTTP'] = 1 if row.get('app_proto') == 'http' else 0
-                    
-                if 'Inbound' in features.columns:
-                    # Estimate if this is inbound based on destination port being a common server port
-                    common_server_ports = [80, 443, 22, 21, 25, 53]
-                    features.at[idx, 'Inbound'] = 1 if row.get('dest_port') in common_server_ports else 0
-            
-            # Reorder columns to match selected_features
-            if self.selected_features:
-                # Verify all required features are present
-                missing_features = [f for f in self.selected_features if f not in features.columns]
-                if missing_features:
-                    print(f"Warning: Missing features for classification: {missing_features}")
-                    # Add any missing features with default value of 0
-                    for feature in missing_features:
-                        features[feature] = 0
-                        
-                # Ensure column order matches the expected order
-                return features[self.selected_features]
-            
-            return features
+        """
+        Extract and transform features from Eve JSON records to match model features.
         
+        Args:
+            df: DataFrame with parsed Eve JSON records
+            
+        Returns:
+            DataFrame with extracted features matching the model's expected features
+        """
+        # Initialize an empty DataFrame to store the extracted features
+        features = pd.DataFrame(index=df.index)
+
+        # Feature mapping between eve.json and CICIDS2017
+        # This is a simplified mapping - expand based on your actual data
+        feature_mapping = {
+            'Flow ID': 'flow_id',
+            'Source IP': 'src_ip',
+            'Source Port': 'src_port',
+            'Destination IP': 'dest_ip',
+            'Destination Port': 'dest_port',
+            'Protocol': 'proto'
+        }
+
+        # Map direct fields
+        for target_field, source_field in feature_mapping.items():
+            if source_field in df.columns:
+                features[target_field] = df[source_field]
+            else:
+                features[target_field] = None
+
+        # Extract flow information
+        for idx, row in df.iterrows():
+            # Parse timestamp if available
+            if 'timestamp' in row:
+                try:
+                    # Convert timestamp to datetime
+                    timestamp = pd.to_datetime(row['timestamp'])
+                    # Extract components
+                    features.at[idx, 'Year'] = timestamp.year
+                    features.at[idx, 'Month'] = timestamp.month
+                    features.at[idx, 'Day'] = timestamp.day
+                    features.at[idx, 'Hour'] = timestamp.hour
+                    features.at[idx, 'Minute'] = timestamp.minute
+                    features.at[idx, 'Second'] = timestamp.second
+                except (ValueError, TypeError):
+                    # Default values if parsing fails
+                    features.at[idx, 'Year'] = 2023
+                    features.at[idx, 'Month'] = 1
+                    features.at[idx, 'Day'] = 1
+                    features.at[idx, 'Hour'] = 0
+                    features.at[idx, 'Minute'] = 0
+                    features.at[idx, 'Second'] = 0
+            
+            # Check if 'flow' is in the record
+            if 'flow' in row and isinstance(row['flow'], dict):
+                flow = row['flow']
+                features.at[idx, 'Flow Duration'] = flow.get('age', 0)
+                features.at[idx, 'Total Fwd Packets'] = flow.get('pkts_toserver', 0)
+                features.at[idx, 'Total Backward Packets'] = flow.get('pkts_toclient', 0)
+                features.at[idx, 'Total Length of Fwd Packets'] = flow.get('bytes_toserver', 0)
+                features.at[idx, 'Total Length of Bwd Packets'] = flow.get('bytes_toclient', 0)
+
+                
+                total_packets = flow.get('pkts_toserver', 0) + flow.get('pkts_toclient', 0)
+                total_bytes = flow.get('bytes_toserver', 0) + flow.get('bytes_toclient', 0)
+
+                # Handle missing features
+                if total_packets > 0:
+                    features.at[idx, 'Average Packet Size'] = total_bytes / total_packets
+                else:
+                    features.at[idx, 'Average Packet Size'] = 0
+
+                # Estimate packet length statistics
+                if 'bytes_toserver' in flow and flow.get('pkts_toserver', 0) > 0:
+                    avg_pkt_size_fwd = flow['bytes_toserver'] / flow['pkts_toserver']
+                else:
+                    avg_pkt_size_fwd = 0
+
+                if 'bytes_toclient' in flow and flow.get('pkts_toclient', 0) > 0:
+                    features.at[idx, 'Avg Bwd Segment Size'] = flow['bytes_toclient'] / flow['pkts_toclient']
+                    features.at[idx, 'Bwd Packet Length Mean'] = features.at[idx, 'Avg Bwd Segment Size']
+                    features.at[idx, 'Bwd Packet Length Max'] = features.at[idx, 'Avg Bwd Segment Size'] * 2  # Estimation
+                else:
+                    features.at[idx, 'Avg Bwd Segment Size'] = 0
+                    features.at[idx, 'Bwd Packet Length Mean'] = 0
+                    features.at[idx, 'Bwd Packet Length Max'] = 0
+
+                # Estimate packet length variance and std (using a heuristic)
+                features.at[idx, 'Packet Length Mean'] = total_bytes / total_packets if total_packets > 0 else 0
+                features.at[idx, 'Packet Length Variance'] = (avg_pkt_size_fwd - features.at[idx, 'Avg Bwd Segment Size'])**2
+                features.at[idx, 'Packet Length Std'] = np.sqrt(features.at[idx, 'Packet Length Variance'])
+                features.at[idx, 'Bwd Packet Length Std'] = features.at[idx, 'Packet Length Std'] / 2  # Estimation
+
+                # Estimate max packet length
+                features.at[idx, 'Max Packet Length'] = max(avg_pkt_size_fwd * 2, features.at[idx, 'Avg Bwd Segment Size'] * 2)
+
+                # Subflow features - assumed same as flow in this context
+                features.at[idx, 'Subflow Fwd Packets'] = flow.get('pkts_toserver', 0)
+                features.at[idx, 'Subflow Fwd Bytes'] = flow.get('bytes_toserver', 0)
+                features.at[idx, 'Subflow Bwd Bytes'] = flow.get('bytes_toclient', 0)
+
+                # Header length estimation (typical TCP/IP header is ~40 bytes)
+                header_size = 40  # Typical TCP/IP header size
+                features.at[idx, 'Fwd Header Length'] = header_size * flow.get('pkts_toserver', 0)
+                features.at[idx, 'Fwd Header Length.1'] = features.at[idx, 'Fwd Header Length']  # Duplicate
+
+                # Estimate active data packets
+                features.at[idx, 'act_data_pkt_fwd'] = flow.get('pkts_toserver', 0)
+
+                # Flow IAT (Inter-Arrival Time) statistics 
+                # These are harder to estimate from aggregated flow data
+                duration = flow.get('age', 0)
+                if duration > 0 and total_packets > 2:
+                    avg_iat = duration / (total_packets - 1)
+                    features.at[idx, 'Flow IAT Std'] = avg_iat / 2  # Rough estimation
+                    features.at[idx, 'Fwd IAT Max'] = avg_iat * 3  # Rough estimation
+                    features.at[idx, 'Fwd IAT Std'] = avg_iat / 2  # Rough estimation
+                else:
+                    features.at[idx, 'Flow IAT Std'] = 0
+                    features.at[idx, 'Fwd IAT Max'] = 0
+                    features.at[idx, 'Fwd IAT Std'] = 0
+
+                # Calculate packet and byte rates if duration is available
+                if features.at[idx, 'Flow Duration'] > 0:
+                    features.at[idx, 'Flow Bytes/s'] = (features.at[idx, 'Total Length of Fwd Packets'] + 
+                                                       features.at[idx, 'Total Length of Bwd Packets']) / features.at[idx, 'Flow Duration']
+                    features.at[idx, 'Flow Packets/s'] = (features.at[idx, 'Total Fwd Packets'] + 
+                                                         features.at[idx, 'Total Backward Packets']) / features.at[idx, 'Flow Duration']
+                    features.at[idx, 'Fwd Packets/s'] = features.at[idx, 'Total Fwd Packets'] / features.at[idx, 'Flow Duration']
+                    features.at[idx, 'Bwd Packets/s'] = features.at[idx, 'Total Backward Packets'] / features.at[idx, 'Flow Duration']
+                else:
+                    features.at[idx, 'Flow Bytes/s'] = 0
+                    features.at[idx, 'Flow Packets/s'] = 0
+                    features.at[idx, 'Fwd Packets/s'] = 0
+                    features.at[idx, 'Bwd Packets/s'] = 0
+            else:
+                # Default values if flow information is not available
+                features.at[idx, 'Flow Duration'] = 0
+                features.at[idx, 'Total Fwd Packets'] = 0
+                features.at[idx, 'Total Backward Packets'] = 0
+                features.at[idx, 'Total Length of Fwd Packets'] = 0
+                features.at[idx, 'Total Length of Bwd Packets'] = 0
+                features.at[idx, 'Flow Bytes/s'] = 0
+                features.at[idx, 'Flow Packets/s'] = 0
+                features.at[idx, 'Fwd Packets/s'] = 0
+                features.at[idx, 'Bwd Packets/s'] = 0
+
+            # Extract TCP information if available
+            if 'tcp' in row and isinstance(row['tcp'], dict):
+                tcp = row['tcp']
+                # Extract TCP flags
+                features.at[idx, 'FIN Flag Count'] = 1 if tcp.get('fin', False) else 0
+                features.at[idx, 'SYN Flag Count'] = 1 if tcp.get('syn', False) else 0
+                features.at[idx, 'RST Flag Count'] = 1 if tcp.get('rst', False) else 0
+                features.at[idx, 'PSH Flag Count'] = 1 if tcp.get('psh', False) else 0
+                features.at[idx, 'ACK Flag Count'] = 1 if tcp.get('ack', False) else 0
+                features.at[idx, 'URG Flag Count'] = 1 if tcp.get('urg', False) else 0
+
+                # Extract window size if available
+                if 'tcp_options' in tcp and isinstance(tcp['tcp_options'], list):
+                    for option in tcp['tcp_options']:
+                        if option.get('type') == 'window scale':
+                            features.at[idx, 'Init_Win_bytes_forward'] = option.get('value', 0)
+                            break
+            else:
+                # Default values if TCP information is not available
+                features.at[idx, 'FIN Flag Count'] = 0
+                features.at[idx, 'SYN Flag Count'] = 0
+                features.at[idx, 'RST Flag Count'] = 0
+                features.at[idx, 'PSH Flag Count'] = 0
+                features.at[idx, 'ACK Flag Count'] = 0
+                features.at[idx, 'URG Flag Count'] = 0
+                features.at[idx, 'Init_Win_bytes_forward'] = 0
+
+            # Add more feature extraction logic here based on the available data in eve.json
+            # and the required features for the model
+
+        # Fill any missing values with zeros
+        features.fillna(0, inplace=True)
+
+        # Select only the features needed by the model if available
+        if self.selected_features and all(f in features.columns for f in self.selected_features):
+            features = features[self.selected_features]
+        
+        return features
     
     
     def analyze_classification(self, features):
