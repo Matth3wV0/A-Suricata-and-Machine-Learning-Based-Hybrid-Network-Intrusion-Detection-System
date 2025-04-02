@@ -706,6 +706,7 @@ class IntrusionDetector:
             features: DataFrame with extracted features
             original_df: Original DataFrame with Eve JSON records
         """
+        print("\n" + "*"*40)
         print(f"Analyzing {len(features)} flows...")
         
         # Update statistics
