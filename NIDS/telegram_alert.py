@@ -46,47 +46,50 @@ class TelegramAlerter:
             # Create new event loop
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
-            
+
             # Initialize client
             self.client = TelegramClient(
                 self.session_path,
-                self.api_id, 
+                self.api_id,
                 self.api_hash
             )
-            
+
+            async def start_client():
+                await self.client.start(bot_token=self.bot_token)
+
             # Start the client
-            self.loop.run_until_complete(self.client.start(bot_token=self.bot_token))
+            self.loop.run_until_complete(start_client())
             print("Telegram client initialized successfully")
         except Exception as e:
             print(f"Error initializing Telegram client: {e}")
             self.client = None
+
     
     def send_alert(self, message):
         """Send alert message via Telegram"""
         if not self.client:
             print("Telegram client not initialized")
             return False
-            
+
         try:
-            # Create async function to send message
+            print(f"Sending message to chat ID: {self.chat_id}")
             async def send_message():
                 await self.client.send_message(
                     self.chat_id,
                     message,
                     parse_mode='html'
                 )
-            
-            # Run the async function in the existing loop
-            future = asyncio.run_coroutine_threadsafe(
-                send_message(), 
-                self.loop
-            )
-            # Wait for result with timeout
+
+            future = asyncio.run_coroutine_threadsafe(send_message(), self.loop)
             future.result(timeout=30)
+            print("Telegram alert sent.")
             return True
         except Exception as e:
-            print(f"Error sending Telegram alert: {e}")
+            import traceback
+            print("Error sending Telegram alert:")
+            traceback.print_exc()
             return False
+
     
     def format_anomaly_alert(self, flow, anomaly_score, anomaly_details=None):
         """Format an anomaly alert message with HTML formatting."""

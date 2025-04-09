@@ -384,7 +384,7 @@ def main():
     
     # Initialize Telegram alerter
     alerter = TelegramAlerter()
-    
+    print(alerter)
     # Execute the selected mode
     if args.mode == 'analyze':
         analyze_suricata_file(args.suricata, models, alerter)
