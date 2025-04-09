@@ -132,7 +132,7 @@ class IntrusionDetector:
         
         # Read the file line by line as each line is a separate JSON object
         data = []
-        with open(self.eve_json_path, 'r') as f:
+        with open(self.eve_json_path, 'r', encoding='utf-8') as f:
             for line in f:
                 try:
                     # Parse the JSON object
