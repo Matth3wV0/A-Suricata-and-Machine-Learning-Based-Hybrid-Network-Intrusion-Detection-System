@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Suricata JSON parser adapted from SLIPS
+Suricata JSON parser for extracting flow information
 """
 
 import json
 import datetime
 from typing import Dict, Any, Union
-from suricata_flows import (
+from utils.suricata_flows import (
     SuricataFlow,
     SuricataHTTP,
     SuricataDNS,
@@ -16,15 +16,13 @@ from suricata_flows import (
 )
 
 class SuricataParser:
-    """Parser for Suricata JSON logs, based on SLIPS input profilers"""
+    """Parser for Suricata JSON logs"""
     
     def __init__(self):
         self.flow = None
 
     def get_answers(self, line: dict) -> list:
-        """
-        Reads the Suricata DNS answer and extracts the CNAME and IPs in the DNS answer
-        """
+        """Extract DNS answers from a Suricata DNS event"""
         line = line.get("dns", False)
         if not line:
             return []
@@ -62,7 +60,7 @@ class SuricataParser:
         return timestamp
         
     def process_line(self, line) -> Union[Dict[str, Any], bool]:
-        """Read Suricata JSON input and parse it into appropriate flow objects"""
+        """Process a single line from Suricata eve.json and convert to a flow object"""
         # Convert to dict if it's not a dict already
         if isinstance(line, str):
             try:
@@ -73,7 +71,7 @@ class SuricataParser:
         if not line:
             return False
 
-        # These fields are common in all Suricata lines regardless of the event type
+        # Common fields in all Suricata lines
         event_type = line.get("event_type")
         if not event_type:
             return False
@@ -100,6 +98,7 @@ class SuricataParser:
             except (IndexError, KeyError):
                 return default_
 
+        # Process different event types
         if event_type == "flow":
             starttime = self.convert_format(
                 get_value_at("flow", "start"), "unixtimestamp"

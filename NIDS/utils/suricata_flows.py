@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Adapter for SLIPS Suricata flow classes
+Dataclasses for different Suricata flow types 
 """
 
 from dataclasses import dataclass
 from typing import Union, List, Dict
 
-# Ported from SLIPS flow classes
 @dataclass
 class SuricataFlow:
     uid: str
@@ -63,9 +62,6 @@ class SuricataHTTP:
     type_: str = "http"
     flow_source: str = "suricata"
 
-    def __post_init__(self):
-        self.uid = str(self.uid)
-
 @dataclass
 class SuricataDNS:
     starttime: str
@@ -84,9 +80,6 @@ class SuricataDNS:
     rcode_name: str = ""
     type_: str = "dns"
     flow_source: str = "suricata"
-
-    def __post_init__(self):
-        self.uid = str(self.uid)
 
 @dataclass
 class SuricataTLS:
@@ -107,9 +100,6 @@ class SuricataTLS:
     type_: str = "ssl"
     flow_source: str = "suricata"
 
-    def __post_init__(self):
-        self.uid = str(self.uid)
-
 @dataclass
 class SuricataFile:
     starttime: str
@@ -129,9 +119,6 @@ class SuricataFile:
     analyzers: str = ""
     tx_hosts: str = ""
     rx_hosts: str = ""
-
-    def __post_init__(self):
-        self.uid = str(self.uid)
 
 @dataclass
 class SuricataSSH:
@@ -156,6 +143,3 @@ class SuricataSSH:
     host_key: str = ""
     type_: str = "ssh"
     flow_source: str = "suricata"
-
-    def __post_init__(self):
-        self.uid = str(self.uid)
