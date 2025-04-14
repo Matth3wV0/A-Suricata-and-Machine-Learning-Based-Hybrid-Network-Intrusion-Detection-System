@@ -264,7 +264,7 @@ class SuricataSession:
             # HTTP info
             'http_event_count': self.http_event_count,
             'unique_http_methods': len(self.http_methods),
-            'has_http_error': any(code.startswith('4') or code.startswith('5') for code in self.http_status_codes),
+            'has_http_error': any(str(code).startswith('4') or str(code).startswith('5') for code in self.http_status_codes),
             'has_http_auth': '401' in self.http_status_codes or '407' in self.http_status_codes,
             
             # DNS info

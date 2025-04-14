@@ -132,7 +132,7 @@ class AdaptiveFlowFeatureExtractor:
         has_http_error = False
         has_http_auth_error = False
         for code in http_status_codes:
-            if code.startswith('4') or code.startswith('5'):
+            if str(code).startswith('4') or str(code).startswith('5'):
                 has_http_error = True
             if code in ['401', '403', '407']:
                 has_http_auth_error = True
