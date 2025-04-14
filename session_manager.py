@@ -10,6 +10,7 @@ import datetime
 from typing import Dict, List, Set, Any, Optional
 from dataclasses import dataclass, field, asdict
 from collections import defaultdict
+from dateutil import parser
 
 # Import Suricata flow types
 from utils.suricata_flows import (
@@ -228,8 +229,8 @@ class SuricataSession:
         # Calculate duration if not already set
         if self.duration == 0 and self.starttime and self.endtime:
             try:
-                start = datetime.datetime.fromisoformat(self.starttime.replace('Z', '+00:00'))
-                end = datetime.datetime.fromisoformat(self.endtime.replace('Z', '+00:00'))
+                start = parser.parse(self.starttime.replace('Z', '+00:00'))
+                end = parser.parse(self.endtime.replace('Z', '+00:00'))
                 self.duration = (end - start).total_seconds()
             except Exception as e:
                 logger.warning(f"Failed to calculate duration for flow {self.flow_id}: {e}")

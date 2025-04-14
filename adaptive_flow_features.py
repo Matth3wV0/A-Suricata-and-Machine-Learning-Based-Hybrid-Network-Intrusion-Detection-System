@@ -11,6 +11,7 @@ import logging
 from dataclasses import asdict
 from typing import Dict, List, Any, Union, Optional
 import datetime
+from dateutil import parser
 
 # Setup logging
 logger = logging.getLogger('hybrid-nids')
@@ -319,10 +320,10 @@ class AdaptiveFlowFeatureExtractor:
             
             # Try ISO format (with Z for UTC)
             if 'Z' in timestamp_str:
-                return datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                return parser.parse(timestamp_str.replace('Z', '+00:00'))
                 
             # Try ISO format
-            return datetime.fromisoformat(timestamp_str)
+            return parser.parse(timestamp_str)
             
         except Exception as e:
             logger.debug(f"Failed to parse timestamp {timestamp}: {e}")
