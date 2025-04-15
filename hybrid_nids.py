@@ -33,18 +33,18 @@ from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
 from xgboost import XGBClassifier
-from dataset_balancer import DatasetBalancer, integrate_binary_balancing, integrate_multiclass_balancing
+from utils.dataset_balancer import DatasetBalancer, integrate_binary_balancing, integrate_multiclass_balancing
 from telethon import TelegramClient
 # Import custom modules
 from utils.suricata_parser import SuricataParser
-from adaptive_flow_features import AdaptiveFlowFeatureExtractor 
-from anomaly_detector import AnomalyDetector
+from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor 
+from utils.anomaly_detector import AnomalyDetector
 from utils.telegram_alert import TelegramAlerter
-from service_whitelist import ServiceWhitelist
+from utils.service_whitelist import ServiceWhitelist
 # Import new modules
-from session_manager import SessionManager, SuricataSession
-from behavioral_analyzer import BehavioralAnalyzer
-from flow_finalizer import FlowFinalizer
+from utils.session_manager import SessionManager, SuricataSession
+from utils.behavioral_analyzer import BehavioralAnalyzer
+from utils.flow_finalizer import FlowFinalizer
 
 # Configure logging
 logging.basicConfig(
