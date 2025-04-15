@@ -43,7 +43,7 @@ A sophisticated hybrid Network Intrusion Detection System that combines signatur
 1. Clone the repository:
    ```
    git clone https://github.com/Matth3wV0/A-Suricata-and-Machine-Learning-Based-Hybrid-Network-Intrusion-Detection-System
-   cd hybrid-nids
+   cd A-Suricata-and-Machine-Learning-Based-Hybrid-Network-Intrusion-Detection-System
    ```
 
 2. Install required Python packages:
