@@ -82,7 +82,7 @@ python hybrid_nids.py --realtime path/to/suricata.json --telegram
 ### Analyzing Suricata Logs
 
 ```bash
-python hybrid_nids.py --analyze path/to/suricata.json --output results.csv
+python hybrid_nids.py --analyze path/to/suricata.json --output results.txt
 ```
 
 ### Command Line Arguments
