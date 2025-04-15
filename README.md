@@ -99,19 +99,19 @@ python hybrid_nids.py --analyze path/to/suricata.json --output results.csv
 ```
 .
 ├── hybrid_nids.py          # Main system orchestrator
-├── adaptive_flow_features.py # Flow feature extraction
-├── session_manager.py      # Session management
-├── behavioral_analyzer.py  # Behavioral analysis
-├── anomaly_detector.py     # Anomaly detection
-├── flow_finalizer.py       # Flow processing
-├── service_whitelist.py    # Service whitelisting
-├── dataset_balancer.py     # Dataset balancing
-├── suricata_debug.py       # Suricata debugging
 ├── training.ipynb          # Interactive training
 ├── utils/                  # Utility modules
 │   ├── suricata_parser.py
 │   ├── suricata_flows.py
-│   └── telegram_alert.py
+│   ├── telegram_alert.py
+│   ├── adaptive_flow_features.py # Flow feature extraction
+│   ├── session_manager.py      # Session management
+│   ├── behavioral_analyzer.py  # Behavioral analysis
+│   ├── anomaly_detector.py     # Anomaly detection
+│   ├── flow_finalizer.py       # Flow processing
+│   ├── service_whitelist.py    # Service whitelisting
+│   ├── dataset_balancer.py     # Dataset balancing
+│   └── suricata_debug.py       # Suricata debugging
 ├── requirements.txt        # Dependencies
 └── .env                    # Configuration
 ```
