@@ -9,9 +9,9 @@ import logging
 import pandas as pd
 from typing import Dict, List, Any, Optional, Callable
 from dataclasses import asdict
-from session_manager import SuricataSession
-from adaptive_flow_features import AdaptiveFlowFeatureExtractor
-from anomaly_detector import AnomalyDetector
+from utils.session_manager import SuricataSession
+from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor
+from utils.anomaly_detector import AnomalyDetector
 
 # Setup logging
 logger = logging.getLogger('hybrid-nids')
