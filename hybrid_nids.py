@@ -79,31 +79,25 @@ class HybridNIDS:
     that combines signature-based detection with advanced anomaly detection capabilities.
     """
     
-    def __init__(self, model_dir='./model', telegram_enabled=False):
+    def __init__(self, model_dir='./model', telegram_enabled=False, 
+             ssh_whitelist_file="ssh_whitelist.json", admin_chat_ids=None):
         """Initialize the Enhanced Hybrid NIDS."""
         self.model_dir = model_dir
         self.models = None
         self.telegram_enabled = telegram_enabled
-        
-        # Initialize TelegramAlerter if enabled
-        # It will connect automatically in the background
-        self.alerter = None
-        if telegram_enabled:
-            try:
-                self.alerter = TelegramAlerter()
-                logger.info("Telegram alerter initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Telegram alerter: {e}")
-                self.alerter = None
-        
+        self.admin_chat_ids = admin_chat_ids or []
+                
+        # Initialize components
         self.parser = SuricataParser()
         self.feature_extractor = AdaptiveFlowFeatureExtractor(ALIGNED_FEATURES)
-        self.service_whitelist = ServiceWhitelist()
+        # Initialize service whitelist with file-based SSH whitelist
+        self.service_whitelist = ServiceWhitelist(ssh_whitelist_file=ssh_whitelist_file)
+        
         
         # Get current directory for session file
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # Initialize new components
+        # Initialize session manager and behavioral analyzer
         self.session_manager = SessionManager(
             session_timeout=120,  # 2 minutes timeout for sessions
             max_sessions=50000    # Maximum sessions to keep in memory
@@ -115,18 +109,29 @@ class HybridNIDS:
             max_tracked_ips=10000  # Maximum IPs to track
         )
         
+        # Initialize TelegramAlerter if enabled
+        # It will connect automatically in the background
+        self.alerter = None
+        if telegram_enabled:
+            try:
+                self.alerter = TelegramAlerter(admin_chat_ids=self.admin_chat_ids)
+                # Connect whitelist manager to alerter
+                self.alerter.set_whitelist_manager(self.service_whitelist)
+                logger.info("Telegram alerter initialized with whitelist management")
+            except Exception as e:
+                logger.error(f"Failed to initialize Telegram alerter: {e}")
+                self.alerter = None
+        
         # Ensure model directory exists
         os.makedirs(model_dir, exist_ok=True)
         
-        # Try to load models if they exist
+           # Try to load models if they exist
         try:
             self.load_models()
             logger.info("Models loaded successfully.")
             
-            # Initialize anomaly detector
+            # Initialize anomaly detector and flow finalizer
             self.anomaly_detector = AnomalyDetector(model_dir=model_dir)
-            
-            # Initialize flow finalizer
             self.flow_finalizer = FlowFinalizer(
                 feature_extractor=self.feature_extractor,
                 anomaly_detector=self.anomaly_detector,
@@ -136,7 +141,6 @@ class HybridNIDS:
                 save_results=True,
                 results_file="flow_results.csv"
             )
-            
         except Exception as e:
             logger.warning(f"Could not load models: {e}")
             self.models = None
@@ -539,7 +543,47 @@ class HybridNIDS:
                 except (ValueError, TypeError):
                     dport = 0
                     
-                if dport > 0 and self.service_whitelist.is_whitelisted(event.daddr, dport, event.proto):
+                # Special handling for SSH (port 22)
+                if dport == 22 and not self.service_whitelist.is_ssh_approved(event.saddr):
+                    logger.warning(f"Unauthorized SSH access attempt from {event.saddr} to {event.daddr}")
+                    
+                    # Create immediate alert for unauthorized SSH
+                    alert_data = {
+                        'flow_id': getattr(event, 'uid', 'unknown'),
+                        'timestamp': time.time(),
+                        'src_ip': event.saddr,
+                        'src_port': getattr(event, 'sport', 'unknown'),
+                        'dst_ip': event.daddr,
+                        'dst_port': "22",
+                        'proto': getattr(event, 'proto', 'unknown'),
+                        'app_proto': "ssh",
+                        'duration': 0,  # Will be updated if available
+                        'ml_result': {'is_anomalous': True, 'score': 1.0},
+                        'stat_result': {'is_anomalous': True, 'score': 1.0},
+                        'combined_score': 1.0,
+                        'is_anomalous': True,
+                        'unauthorized_ssh': True
+                    }
+                    
+                    # Add duration if available
+                    if hasattr(event, 'dur') and event.dur:
+                        alert_data['duration'] = float(event.dur)
+                    
+                    # Add packet and byte counts if available
+                    if hasattr(event, 'spkts'):
+                        alert_data['total_fwd_packets'] = event.spkts
+                    if hasattr(event, 'dpkts'):
+                        alert_data['total_bwd_packets'] = event.dpkts
+                    if hasattr(event, 'sbytes'):
+                        alert_data['total_fwd_bytes'] = event.sbytes
+                    if hasattr(event, 'dbytes'):
+                        alert_data['total_bwd_bytes'] = event.dbytes
+                    
+                    # Call alert handler directly
+                    self.handle_alert(alert_data)
+                    
+                # For other ports, check the general whitelist
+                elif dport > 0 and self.service_whitelist.is_whitelisted(event.daddr, dport, event.proto):
                     logger.debug(f"Skipping whitelisted service: {event.daddr}:{dport} ({event.proto})")
                     return None
         except Exception as e:
@@ -628,6 +672,41 @@ class HybridNIDS:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             session = alert_data.get('session', {})
             
+            # Special formatting for unauthorized SSH
+            if alert_data.get('unauthorized_ssh', False):
+                message = f"🚨 UNAUTHORIZED SSH ACCESS ATTEMPT 🚨\n"
+                message += f"Time: {timestamp}\n"
+                message += "-" * 40 + "\n"
+                
+                # Connection details
+                message += "CONNECTION DETAILS:\n"
+                message += f"Source IP: {alert_data.get('src_ip', 'Unknown')} (NOT WHITELISTED)\n"
+                message += f"Source Port: {alert_data.get('src_port', 'Unknown')}\n"
+                message += f"Destination IP: {alert_data.get('dst_ip', 'Unknown')}\n"
+                message += f"Destination Port: 22 (SSH)\n"
+                message += f"Protocol: {alert_data.get('proto', 'Unknown')}\n"
+                
+                # Add timing information if available
+                if 'starttime' in session:
+                    message += f"Flow Start: {session.get('starttime', 'Unknown')}\n"
+                if 'endtime' in session:
+                    message += f"Flow End: {session.get('endtime', 'Unknown')}\n"
+                if 'duration' in alert_data:
+                    message += f"Duration: {float(alert_data.get('duration', 0)):.3f} seconds\n"
+                
+                message += "-" * 40 + "\n"
+                message += "ACTION REQUIRED:\n"
+                message += "• Investigate this unauthorized SSH access attempt\n"
+                message += "• If this IP should be allowed, add it to whitelist with:\n"
+                message += f"  `/whitelist_ip {alert_data.get('src_ip', 'Unknown')}`\n"
+                
+                message += "-" * 40 + "\n"
+                message += f"Alert generated: {timestamp}\n"
+                
+                return message
+            
+            
+            # Default formatting for other alerts
             message = f"⚠️ ANOMALY DETECTED ⚠️\n"
             message += f"Time: {timestamp}\n"
             message += "-" * 40 + "\n"
@@ -1098,7 +1177,7 @@ class HybridNIDS:
 
 def parse_args():
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='Enhanced Hybrid NIDS with Session and Behavioral Awareness')
+    parser = argparse.ArgumentParser(description='Enhanced Hybrid NIDS with SSH Whitelist Management')
     
     # Action arguments (mutually exclusive)
     action_group = parser.add_mutually_exclusive_group(required=True)
@@ -1118,16 +1197,32 @@ def parse_args():
     parser.add_argument('--telegram', 
                        action='store_true',
                        help='Enable Telegram alerts')
+    parser.add_argument('--whitelist_file',
+                       default='ssh_whitelist.json',
+                       help='File to store SSH whitelist')
+    parser.add_argument('--admin_chat_ids',
+                       help='Comma-separated list of admin chat IDs for Telegram commands')
     
     return parser.parse_args()
+
 
 
 def main():
     """Main function."""
     args = parse_args()
     
+    # Process admin chat IDs
+    admin_chat_ids = []
+    if args.admin_chat_ids:
+        admin_chat_ids = [chat_id.strip() for chat_id in args.admin_chat_ids.split(',')]
+    
     # Initialize Hybrid NIDS
-    nids = HybridNIDS(model_dir=args.model_dir, telegram_enabled=args.telegram)
+    nids = HybridNIDS(
+        model_dir=args.model_dir, 
+        telegram_enabled=args.telegram,
+        ssh_whitelist_file=args.whitelist_file,
+        admin_chat_ids=admin_chat_ids
+    )
     
     # Execute the selected action
     if args.train:
@@ -1137,8 +1232,6 @@ def main():
     elif args.realtime:
         nids.monitor_suricata_file(args.realtime, args.output)
     
-    # No need to explicitly disconnect the Telegram client
-    # The daemon thread will be terminated when the main program exits
     logger.info("NIDS execution completed")
 
 

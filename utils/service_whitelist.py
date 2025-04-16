@@ -6,6 +6,8 @@ Provides a whitelist of legitimate services to prevent false positives
 
 import logging
 import socket
+import json
+import os
 from typing import List, Dict, Tuple, Set, Optional
 
 # Setup logging
@@ -16,7 +18,7 @@ class ServiceWhitelist:
     Maintains a list of well-known services that should not be flagged as anomalous
     """
     
-    def __init__(self):
+    def __init__(self, ssh_whitelist_file="ssh_whitelist.json"):
         """Initialize the whitelist with common legitimate services"""
         # Well-known DNS servers
         self.dns_servers: List[str] = [
@@ -69,8 +71,72 @@ class ServiceWhitelist:
             "255.255.255.255" # Broadcast
         ]
         
+        # SSH whitelist configuration
+        self.ssh_whitelist_file = ssh_whitelist_file
+        self.ssh_approved_ips = set()
+        
+        # Load SSH whitelist from file if it exists
+        self.load_ssh_whitelist()
+        
         logger.info(f"Initialized service whitelist with {len(self.dns_servers)} DNS servers, "
-                   f"{len(self.ntp_server_ips)} NTP servers, and {len(self.known_services)} other services")
+                   f"{len(self.ntp_server_ips)} NTP servers, and {len(self.ssh_approved_ips)} SSH approved IPs")
+    
+    
+    def load_ssh_whitelist(self):
+        """Load SSH whitelist from file"""
+        try:
+            if os.path.exists(self.ssh_whitelist_file):
+                with open(self.ssh_whitelist_file, 'r') as f:
+                    whitelist_data = json.load(f)
+                    self.ssh_approved_ips = set(whitelist_data.get('ssh_approved_ips', []))
+                logger.info(f"Loaded {len(self.ssh_approved_ips)} SSH approved IPs from {self.ssh_whitelist_file}")
+            else:
+                logger.info(f"SSH whitelist file {self.ssh_whitelist_file} not found, starting with empty whitelist")
+                self.ssh_approved_ips = set()
+        except Exception as e:
+            logger.error(f"Error loading SSH whitelist: {e}")
+            self.ssh_approved_ips = set()
+    
+    
+    def save_ssh_whitelist(self):
+        """Save SSH whitelist to file"""
+        try:
+            whitelist_data = {
+                'ssh_approved_ips': list(self.ssh_approved_ips)
+            }
+            with open(self.ssh_whitelist_file, 'w') as f:
+                json.dump(whitelist_data, f, indent=2)
+            logger.info(f"Saved {len(self.ssh_approved_ips)} SSH approved IPs to {self.ssh_whitelist_file}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving SSH whitelist: {e}")
+            return False
+    
+    def add_ssh_approved_ip(self, ip_addr):
+        """Add an IP to the approved SSH access list"""
+        if ip_addr not in self.ssh_approved_ips:
+            self.ssh_approved_ips.add(ip_addr)
+            logger.info(f"Added {ip_addr} to SSH approved list")
+            self.save_ssh_whitelist()
+            return True
+        return False
+    
+    def remove_ssh_approved_ip(self, ip_addr):
+        """Remove an IP from the approved SSH access list"""
+        if ip_addr in self.ssh_approved_ips:
+            self.ssh_approved_ips.remove(ip_addr)
+            logger.info(f"Removed {ip_addr} from SSH approved list")
+            self.save_ssh_whitelist()
+            return True
+        return False
+    
+    def is_ssh_approved(self, ip_addr):
+        """Check if an IP is approved for SSH access"""
+        return ip_addr in self.ssh_approved_ips
+    
+    def get_ssh_approved_ips(self):
+        """Get all approved SSH IPs"""
+        return list(self.ssh_approved_ips)
     
     def _resolve_domains(self, domains: List[str]) -> Set[str]:
         """Resolve domain names to IP addresses"""
@@ -124,6 +190,7 @@ class ServiceWhitelist:
         Returns:
             True if the connection is to a whitelisted service
         """
+        
         # Check DNS servers (port 53)
         if port == 53 and ip_addr in self.dns_servers:
             logger.debug(f"Whitelisted DNS server: {ip_addr}:{port}")
@@ -134,7 +201,15 @@ class ServiceWhitelist:
             if ip_addr in self.ntp_server_ips:
                 logger.debug(f"Whitelisted NTP server: {ip_addr}:{port}")
                 return True
-            
+                
+        # Special case for SSH (port 22)
+        if port == 22:
+            # Only whitelist if the source IP is explicitly approved for SSH
+            approved = ip_addr in self.ssh_approved_ips
+            if approved:
+                logger.debug(f"Approved SSH connection from whitelisted IP: {ip_addr}")
+            return approved
+        
         # Check other known services
         if (ip_addr, port) in self.known_services:
             service_name = self.known_services[(ip_addr, port)]
