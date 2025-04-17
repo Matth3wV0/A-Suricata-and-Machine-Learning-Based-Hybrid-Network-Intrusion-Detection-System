@@ -76,7 +76,7 @@ class ServiceWhitelist:
         logger.info(f"Added {len(self.pfsense_interfaces)} pfSense interfaces to trusted list")
         
         logger.info(f"Initialized service whitelist with {len(self.dns_servers)} DNS servers, "
-                   f"{len(self.ntp_server_ips)} NTP servers, and {len(self.ssh_approved_ips)} SSH approved IPs")
+                   f"{len(self.ntp_server_ips)} NTP servers, and {len(self.pfsense_interfaces)} Pfsense approved IPs")
     
     def _resolve_domains(self, domains: List[str]) -> Set[str]:
         """Resolve domain names to IP addresses"""
