@@ -11,11 +11,8 @@ import datetime
 import threading
 import time
 from threading import Event
-from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
-# Import Telethon modules explicitly
-from telethon import TelegramClient, utils, events  # Add events here
-import re
+from telethon import TelegramClient, utils
 
 # Setup logging
 logger = logging.getLogger('hybrid-nids')
@@ -26,16 +23,13 @@ load_dotenv()
 class TelegramAlerter:
     """Class for sending alerts via Telegram with chat ID testing"""
     
-    def __init__(self, bot_token=None, chat_id=None, api_id=None, api_hash=None, 
-                 admin_chat_ids=None, whitelist_manager=None):
+    def __init__(self, bot_token=None, chat_id=None, api_id=None, api_hash=None):
         """Initialize Telegram alerter with chat ID testing"""
         # Load from parameters or environment variables
         self.bot_token = bot_token or os.getenv('TELEGRAM_TOKEN')
         self.chat_id = chat_id or os.getenv('TELEGRAM_CHAT_ID')
         self.api_id = api_id or os.getenv('API_ID')
         self.api_hash = api_hash or os.getenv('API_HASH')
-        self.admin_chat_ids = admin_chat_ids or os.getenv('ADMIN_CHAT_ID')  # List of admin chat IDs
-        self.whitelist_manager = whitelist_manager  # Reference to ServiceWhitelist instance
         
         # Store original chat ID to try different formats
         self.original_chat_id = self.chat_id
@@ -81,173 +75,6 @@ class TelegramAlerter:
         if not self.connected.wait(timeout=15):
             logger.warning("Initial Telegram connection not established within timeout")
             logger.warning("Messages will be queued and sent when connection is established")
-    
-        # Set up command handlers if client is initialized
-        if self.client:
-            self._setup_command_handlers()
-            
-    def _setup_command_handlers(self):
-        """Set up Telegram command handlers"""
-        # Only proceed if client exists
-        if not self.client:
-            return
-            
-        # Handler for /whitelist_ip command
-        @self.client.on(events.NewMessage(pattern='/whitelist_ip'))
-        async def handle_whitelist_ip(event):
-            try:
-                # Check if sender is an admin
-                sender = await event.get_sender()
-                chat_id = event.chat_id
-                
-                if str(chat_id) not in self.admin_chat_ids and str(sender.id) not in self.admin_chat_ids:
-                    await event.respond("⛔ You are not authorized to use this command.")
-                    return
-                
-                # Extract IP from command
-                command_text = event.message.text.strip()
-                match = re.search(r'/whitelist_ip\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', command_text)
-                
-                if not match:
-                    await event.respond("⚠️ Invalid format. Usage: `/whitelist_ip 192.168.1.100`")
-                    return
-                
-                ip_addr = match.group(1)
-                
-                # Validate IP address format
-                ip_parts = ip_addr.split('.')
-                if len(ip_parts) != 4 or not all(0 <= int(part) <= 255 for part in ip_parts):
-                    await event.respond(f"⚠️ Invalid IP address format: {ip_addr}")
-                    return
-                
-                # Add IP to whitelist
-                if self.whitelist_manager and self.whitelist_manager.add_ssh_approved_ip(ip_addr):
-                    await event.respond(f"✅ Added {ip_addr} to SSH whitelist")
-                else:
-                    await event.respond(f"ℹ️ IP {ip_addr} is already in the SSH whitelist")
-                
-            except Exception as e:
-                logger.error(f"Error handling whitelist command: {e}")
-                await event.respond(f"❌ Error: {str(e)}")
-        
-        # Handler for /remove_whitelist_ip command
-        @self.client.on(events.NewMessage(pattern='/remove_whitelist_ip'))
-        async def handle_remove_whitelist_ip(event):
-            try:
-                # Check if sender is an admin
-                sender = await event.get_sender()
-                chat_id = event.chat_id
-                
-                if str(chat_id) not in self.admin_chat_ids and str(sender.id) not in self.admin_chat_ids:
-                    await event.respond("⛔ You are not authorized to use this command.")
-                    return
-                
-                # Extract IP from command
-                command_text = event.message.text.strip()
-                match = re.search(r'/remove_whitelist_ip\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', command_text)
-                
-                if not match:
-                    await event.respond("⚠️ Invalid format. Usage: `/remove_whitelist_ip 192.168.1.100`")
-                    return
-                
-                ip_addr = match.group(1)
-                
-                # Remove IP from whitelist
-                if self.whitelist_manager and self.whitelist_manager.remove_ssh_approved_ip(ip_addr):
-                    await event.respond(f"✅ Removed {ip_addr} from SSH whitelist")
-                else:
-                    await event.respond(f"ℹ️ IP {ip_addr} is not in the SSH whitelist")
-                
-            except Exception as e:
-                logger.error(f"Error handling remove whitelist command: {e}")
-                await event.respond(f"❌ Error: {str(e)}")
-        
-        # Handler for /list_whitelist command
-        @self.client.on(events.NewMessage(pattern='/list_whitelist'))
-        async def handle_list_whitelist(event):
-            try:
-                # Check if sender is an admin
-                sender = await event.get_sender()
-                chat_id = event.chat_id
-                
-                if str(chat_id) not in self.admin_chat_ids and str(sender.id) not in self.admin_chat_ids:
-                    await event.respond("⛔ You are not authorized to use this command.")
-                    return
-                
-                # Get list of whitelisted IPs
-                if self.whitelist_manager:
-                    ips = self.whitelist_manager.get_ssh_approved_ips()
-                    if ips:
-                        message = "📋 SSH Whitelist:\n\n"
-                        for i, ip in enumerate(sorted(ips), 1):
-                            message += f"{i}. {ip}\n"
-                        await event.respond(message)
-                    else:
-                        await event.respond("📋 SSH Whitelist is empty")
-                else:
-                    await event.respond("❌ Whitelist manager not available")
-                
-            except Exception as e:
-                logger.error(f"Error handling list whitelist command: {e}")
-                await event.respond(f"❌ Error: {str(e)}")
-        
-        # Handler for /help command
-        @self.client.on(events.NewMessage(pattern='/help'))
-        async def handle_help(event):
-            try:
-                # Check if sender is an admin
-                sender = await event.get_sender()
-                chat_id = event.chat_id
-                
-                if str(chat_id) not in self.admin_chat_ids and str(sender.id) not in self.admin_chat_ids:
-                    await event.respond("⛔ You are not authorized to use this command.")
-                    return
-                
-                help_text = """
-                📚 **Available Commands**:
-
-                SSH Whitelist Management:
-                - `/whitelist_ip <ip>` - Add IP to SSH whitelist
-                - `/remove_whitelist_ip <ip>` - Remove IP from SSH whitelist
-                - `/list_whitelist` - List all whitelisted SSH IPs
-
-                General:
-                - `/help` - Show this help message
-                """
-                await event.respond(help_text)
-                
-            except Exception as e:
-                logger.error(f"Error handling help command: {e}")
-                await event.respond(f"❌ Error: {str(e)}")
-        
-        # # Register handlers explicitly
-        # self.client.add_event_handler(
-        #     handle_whitelist_ip,
-        #     events.NewMessage(pattern='/whitelist_ip')
-        # )
-        
-        # self.client.add_event_handler(
-        #     handle_remove_whitelist_ip,
-        #     events.NewMessage(pattern='/remove_whitelist_ip')
-        # )
-        
-        # self.client.add_event_handler(
-        #     handle_list_whitelist,
-        #     events.NewMessage(pattern='/list_whitelist')
-        # )
-        
-        # self.client.add_event_handler(
-        #     handle_help,
-        #     events.NewMessage(pattern='/help')
-        # )
-        
-        logger.info("Telegram command handlers registered successfully")
-    
-    def set_whitelist_manager(self, whitelist_manager):
-        """Set the whitelist manager instance"""
-        self.whitelist_manager = whitelist_manager
-        logger.info("Whitelist manager set for Telegram alerter")
-            
     
     def _process_chat_id(self, chat_id):
         """Process chat_id to ensure it's in a format that the bot can use"""

@@ -232,7 +232,6 @@ class AnomalyDetector:
                     
                     # Use the updated dataframe
                     base_features = safe_base_features
-                    
             # Initialize anomaly score and details
             anomaly_score = 0
             anomaly_details = []
@@ -244,14 +243,6 @@ class AnomalyDetector:
                     continue
                 
                 try:
-                    # Add special handling for DNS traffic
-                    is_dns_traffic = False
-                    
-                    # Check if this is DNS traffic
-                    if 'dest_port' in features.columns:
-                        dest_port = features['dest_port'].iloc[0] if len(features) > 0 else 0
-                        is_dns_traffic = (dest_port == 53)
-                    
                     # Get feature value safely
                     if len(base_features) > 0:
                         value = float(base_features[feature].iloc[0])
@@ -325,20 +316,6 @@ class AnomalyDetector:
             
             # Skip app-layer detection for now
             
-             # Adjust detection thresholds for DNS traffic
-            if is_dns_traffic:
-                # For DNS, higher down/up ratios are normal, so increase the threshold for flagging
-                if 'down_up_ratio' in feature_scores:
-                    # Only consider it anomalous if the ratio is extremely high (e.g., >20)
-                    if feature_scores['down_up_ratio'] < 20:
-                        feature_scores['down_up_ratio'] = 0  # Reset score for typical DNS ratios
-                        
-                # Adjust the final determination for DNS traffic
-                is_anomalous = anomaly_score > 1.5  # Higher threshold for DNS
-            else:
-                # Regular threshold for non-DNS traffic
-                is_anomalous = anomaly_score > 0.7
-            
             return {
                 'score': float(anomaly_score),
                 'is_anomalous': bool(is_anomalous),
@@ -365,8 +342,8 @@ class AnomalyDetector:
         ml_result = self.detect_ml_anomaly(features)
         
         # Detect using statistical methods
-        # stat_result = self.detect_statistical_anomaly(features)
-        stat_result = {'is_anomalous': False, 'score': 0, 'details': []}
+        stat_result = self.detect_statistical_anomaly(features)
+        
         # Combine scores from both methods
         combined_score = max(ml_result.get('score', 0), stat_result.get('score', 0))
         
