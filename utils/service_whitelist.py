@@ -69,8 +69,14 @@ class ServiceWhitelist:
             "255.255.255.255" # Broadcast
         ]
         
+        # Add pfSense internal interfaces to trusted list
+        self.pfsense_interfaces = set()
+        self.pfsense_interfaces.add("10.0.0.2")  # Add your pfSense interface IP
+        
+        logger.info(f"Added {len(self.pfsense_interfaces)} pfSense interfaces to trusted list")
+        
         logger.info(f"Initialized service whitelist with {len(self.dns_servers)} DNS servers, "
-                   f"{len(self.ntp_server_ips)} NTP servers, and {len(self.known_services)} other services")
+                   f"{len(self.ntp_server_ips)} NTP servers, and {len(self.ssh_approved_ips)} SSH approved IPs")
     
     def _resolve_domains(self, domains: List[str]) -> Set[str]:
         """Resolve domain names to IP addresses"""
@@ -124,6 +130,12 @@ class ServiceWhitelist:
         Returns:
             True if the connection is to a whitelisted service
         """
+        
+        # Check pfSense IP
+        if ip_addr in self.pfsense_interfaces:
+            logger.debug(f"Whitelisted PfSense Interface: {ip_addr}:{port}")
+            return True
+        
         # Check DNS servers (port 53)
         if port == 53 and ip_addr in self.dns_servers:
             logger.debug(f"Whitelisted DNS server: {ip_addr}:{port}")
