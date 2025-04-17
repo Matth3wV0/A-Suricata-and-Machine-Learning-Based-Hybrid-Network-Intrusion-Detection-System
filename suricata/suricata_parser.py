@@ -6,7 +6,7 @@ Suricata JSON parser for extracting flow information
 import json
 import datetime
 from typing import Dict, Any, Union
-from utils.suricata_flows import (
+from suricata.suricata_flows import (
     SuricataFlow,
     SuricataHTTP,
     SuricataDNS,

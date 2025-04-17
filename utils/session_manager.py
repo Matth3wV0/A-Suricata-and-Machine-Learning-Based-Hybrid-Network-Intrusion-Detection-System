@@ -13,7 +13,7 @@ from collections import defaultdict
 from dateutil import parser
 
 # Import Suricata flow types
-from utils.suricata_flows import (
+from suricata.suricata_flows import (
     SuricataFlow,
     SuricataHTTP,
     SuricataDNS,

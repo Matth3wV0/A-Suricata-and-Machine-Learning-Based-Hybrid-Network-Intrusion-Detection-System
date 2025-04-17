@@ -36,7 +36,7 @@ from xgboost import XGBClassifier
 from utils.dataset_balancer import DatasetBalancer, integrate_binary_balancing, integrate_multiclass_balancing
 from telethon import TelegramClient
 # Import custom modules
-from utils.suricata_parser import SuricataParser
+from suricata.suricata_parser import SuricataParser
 from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor 
 from utils.anomaly_detector import AnomalyDetector
 from utils.telegram_alert import TelegramAlerter
@@ -536,6 +536,13 @@ class HybridNIDS:
             return None
         # Whitelist check for events
         try:
+            
+            # Skip processing for trusted internal devices like pfSense
+            if hasattr(event, 'saddr') and event.saddr in self.service_whitelist.pfsense_interfaces:
+                # Only skip DNS traffic (keep monitoring other traffic like SSH)
+                if hasattr(event, 'dport') and event.dport == "53":
+                    return None
+            
             # Extract relevant information for whitelist checking
             if hasattr(event, 'daddr') and hasattr(event, 'dport') and hasattr(event, 'proto'):
                 try:
@@ -672,42 +679,8 @@ class HybridNIDS:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             session = alert_data.get('session', {})
             
-            # Special formatting for unauthorized SSH
-            if alert_data.get('unauthorized_ssh', False):
-                message = f"🚨 UNAUTHORIZED SSH ACCESS ATTEMPT 🚨\n"
-                message += f"Time: {timestamp}\n"
-                message += "-" * 40 + "\n"
-                
-                # Connection details
-                message += "CONNECTION DETAILS:\n"
-                message += f"Source IP: {alert_data.get('src_ip', 'Unknown')} (NOT WHITELISTED)\n"
-                message += f"Source Port: {alert_data.get('src_port', 'Unknown')}\n"
-                message += f"Destination IP: {alert_data.get('dst_ip', 'Unknown')}\n"
-                message += f"Destination Port: 22 (SSH)\n"
-                message += f"Protocol: {alert_data.get('proto', 'Unknown')}\n"
-                
-                # Add timing information if available
-                if 'starttime' in session:
-                    message += f"Flow Start: {session.get('starttime', 'Unknown')}\n"
-                if 'endtime' in session:
-                    message += f"Flow End: {session.get('endtime', 'Unknown')}\n"
-                if 'duration' in alert_data:
-                    message += f"Duration: {float(alert_data.get('duration', 0)):.3f} seconds\n"
-                
-                message += "-" * 40 + "\n"
-                message += "ACTION REQUIRED:\n"
-                message += "• Investigate this unauthorized SSH access attempt\n"
-                message += "• If this IP should be allowed, add it to whitelist with:\n"
-                message += f"  `/whitelist_ip {alert_data.get('src_ip', 'Unknown')}`\n"
-                
-                message += "-" * 40 + "\n"
-                message += f"Alert generated: {timestamp}\n"
-                
-                return message
-            
-            
             # Default formatting for other alerts
-            message = f"⚠️ ANOMALY DETECTED ⚠️\n"
+            message = f"🚨 ANOMALY DETECTED 🚨\n"
             message += f"Time: {timestamp}\n"
             message += "-" * 40 + "\n"
             
@@ -861,7 +834,7 @@ class HybridNIDS:
             message += "-" * 40 + "\n"
             
             # Add possible threat implications
-            message += "POSSIBLE THREAT IMPLICATIONS:\n"
+            message += "⚠️ POSSIBLE THREAT IMPLICATIONS ⚠️\n"
             
             # Some basic threat heuristics
             try:
@@ -985,7 +958,7 @@ class HybridNIDS:
         anomalies_detected = 0
         
         # Process the file line by line
-        with open(file_path, 'r') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 total_entries += 1
                 

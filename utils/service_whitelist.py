@@ -70,6 +70,11 @@ class ServiceWhitelist:
             "224.0.0.251",   # mDNS
             "255.255.255.255" # Broadcast
         ]
+         # Add pfSense internal interfaces to trusted list
+        self.pfsense_interfaces = set()
+        self.pfsense_interfaces.add("10.0.0.2")  # Add your pfSense interface IP
+        
+        logger.info(f"Added {len(self.pfsense_interfaces)} pfSense interfaces to trusted list")
         
         # SSH whitelist configuration
         self.ssh_whitelist_file = ssh_whitelist_file
@@ -209,6 +214,11 @@ class ServiceWhitelist:
             if approved:
                 logger.debug(f"Approved SSH connection from whitelisted IP: {ip_addr}")
             return approved
+        
+        # Special case for DNS traffic from pfSense
+        if port == 53 and ip_addr in self.pfsense_interfaces:
+            logger.debug(f"Whitelisting DNS traffic from pfSense interface: {ip_addr}")
+            return True
         
         # Check other known services
         if (ip_addr, port) in self.known_services:

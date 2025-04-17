@@ -220,26 +220,26 @@ class TelegramAlerter:
                 logger.error(f"Error handling help command: {e}")
                 await event.respond(f"❌ Error: {str(e)}")
         
-        # Register handlers explicitly
-        self.client.add_event_handler(
-            handle_whitelist_ip,
-            events.NewMessage(pattern='/whitelist_ip')
-        )
+        # # Register handlers explicitly
+        # self.client.add_event_handler(
+        #     handle_whitelist_ip,
+        #     events.NewMessage(pattern='/whitelist_ip')
+        # )
         
-        self.client.add_event_handler(
-            handle_remove_whitelist_ip,
-            events.NewMessage(pattern='/remove_whitelist_ip')
-        )
+        # self.client.add_event_handler(
+        #     handle_remove_whitelist_ip,
+        #     events.NewMessage(pattern='/remove_whitelist_ip')
+        # )
         
-        self.client.add_event_handler(
-            handle_list_whitelist,
-            events.NewMessage(pattern='/list_whitelist')
-        )
+        # self.client.add_event_handler(
+        #     handle_list_whitelist,
+        #     events.NewMessage(pattern='/list_whitelist')
+        # )
         
-        self.client.add_event_handler(
-            handle_help,
-            events.NewMessage(pattern='/help')
-        )
+        # self.client.add_event_handler(
+        #     handle_help,
+        #     events.NewMessage(pattern='/help')
+        # )
         
         logger.info("Telegram command handlers registered successfully")
     
