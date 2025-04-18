@@ -1041,7 +1041,7 @@ class HybridNIDS:
                                 
                                 # Process entry using parser
                                 event = self.parser.process_line(entry)
-                                
+                                print(event)
                                 if not event:
                                     continue
                                 
