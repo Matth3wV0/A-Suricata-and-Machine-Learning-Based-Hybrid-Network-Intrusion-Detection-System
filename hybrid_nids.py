@@ -595,7 +595,7 @@ class HybridNIDS:
             alert_message = self.format_alert(alert_data)
             
             # Log to console
-            self._log_alert(alert_message)
+            self._log_alert(alert_data)
             
             # Send to output file if specified
             if hasattr(self, 'output_file') and self.output_file:
