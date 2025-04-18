@@ -103,16 +103,17 @@ class HybridNIDS:
         # Get current directory for session file
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # Initialize new components
+        # Initialize new components with optimized parameters for SSH brute force detection
         self.session_manager = SessionManager(
-            session_timeout=120,  # 2 minutes timeout for sessions
-            max_sessions=50000    # Maximum sessions to keep in memory
+            session_timeout=60,        # 1 minute timeout for regular sessions
+            ssh_session_timeout=15,    # 15 seconds timeout for SSH sessions
+            max_sessions=50000         # Maximum sessions to keep in memory
         )
         
         self.behavioral_analyzer = BehavioralAnalyzer(
-            window_size=300,       # 5 minutes window for behavioral analysis
-            cleanup_interval=60,   # Cleanup every minute
-            max_tracked_ips=10000  # Maximum IPs to track
+            window_size=300,           # 5 minutes window for behavioral analysis
+            cleanup_interval=30,       # Cleanup every 30 seconds - more frequent
+            max_tracked_ips=10000      # Maximum IPs to track
         )
         
         # Ensure model directory exists
@@ -126,13 +127,13 @@ class HybridNIDS:
             # Initialize anomaly detector
             self.anomaly_detector = AnomalyDetector(model_dir=model_dir)
             
-            # Initialize flow finalizer
+            # Initialize flow finalizer with optimized parameters
             self.flow_finalizer = FlowFinalizer(
                 feature_extractor=self.feature_extractor,
                 anomaly_detector=self.anomaly_detector,
                 alert_callback=self.handle_alert,
-                min_session_duration=0.0,
-                zero_byte_threshold=3,
+                min_session_duration=0.0,      # Don't filter by duration
+                zero_byte_threshold=2,         # Lower threshold (2 instead of 3)
                 save_results=True,
                 results_file="flow_results.csv"
             )
@@ -320,24 +321,6 @@ class HybridNIDS:
         elif 'label' in df.columns:
             df['Label'] = np.where((df['label'] == 'BENIGN') | (df['label'] == 'benign'), 0, 1)
             df.drop('label', axis=1, inplace=True)
-        
-        # Identify and handle outliers
-        # This is a simple method - you might want to use more sophisticated approaches
-        # numeric_cols = df.select_dtypes(include=['float', 'int']).columns
-        # for col in numeric_cols:
-        #     Q1 = df[col].quantile(0.25)
-        #     Q3 = df[col].quantile(0.75)
-        #     IQR = Q3 - Q1
-            
-        #     extreme_upper = Q3 + 3 * IQR
-        #     extreme_lower = Q1 - 3 * IQR
-            
-        #     # Only remove extreme outliers
-        #     extreme_mask = (df[col] > extreme_upper) | (df[col] < extreme_lower)
-        #     if extreme_mask.sum() > 0 and extreme_mask.sum() < len(df) * 0.01:  # Don't remove more than 1%
-        #         logger.info(f"Capping extreme outliers in {col}: {extreme_mask.sum()} values")
-        #         df.loc[df[col] > extreme_upper, col] = extreme_upper
-        #         df.loc[df[col] < extreme_lower, col] = extreme_lower
         
         logger.info(f"Dataset loaded and preprocessed. Shape: {df.shape}")
         
@@ -547,10 +530,12 @@ class HybridNIDS:
                     logger.debug(f"Skipping whitelisted service: {event.daddr}:{dport} ({event.proto})")
                     return None
                 
+                # Check for SSH events and log them for debugging
+                if dport == 22 or (hasattr(event, 'appproto') and event.appproto == 'ssh'):
+                    logger.debug(f"Processing SSH event: {event.saddr} -> {event.daddr}:{dport}")
                 
         except Exception as e:
             logger.debug(f"Error in whitelist check: {e}")
-            
             
         # Process event through session manager
         finalized_session = self.session_manager.process_event(event)
@@ -650,6 +635,13 @@ class HybridNIDS:
             if 'app_proto' in alert_data and alert_data['app_proto']:
                 message += f"App Protocol: {alert_data.get('app_proto', 'Unknown')}\n"
             
+            # Add SSH-specific details if it's an SSH connection
+            is_ssh = (alert_data.get('app_proto') == 'ssh' or alert_data.get('dst_port') == '22')
+            if is_ssh:
+                message += f"SSH Authentication Failure: {alert_data.get('ssh_auth_failure', False)}\n"
+                if 'recent_ssh_failures' in alert_data:
+                    message += f"Recent SSH Auth Failures: {alert_data.get('recent_ssh_failures', 0)}\n"
+            
             # Add application layer details if available
             if session.get('http_event_count', 0) > 0:
                 message += f"HTTP Events: {session.get('http_event_count', 0)}\n"
@@ -715,22 +707,22 @@ class HybridNIDS:
             
             # Decision Tree
             if 'dt_confidence' in ml_result:
-                message += f"  → Decision Tree: {'Anomalous' if ml_result.get('dt_prediction') == 1 else 'Benign'} (confidence: {ml_result.get('dt_confidence', 0):.2f})\n"
+                message += f"  → Decision Tree: {'**Anomalous**' if ml_result.get('dt_prediction') == 1 else 'Benign'} (confidence: {ml_result.get('dt_confidence', 0):.2f})\n"
             else:
-                message += f"  → Decision Tree: {'Anomalous' if ml_result.get('dt_prediction') == 1 else 'Benign'}\n"
+                message += f"  → Decision Tree: {'**Anomalous**' if ml_result.get('dt_prediction') == 1 else 'Benign'}\n"
                 
             # Random Forest
             if 'rf_confidence' in ml_result:
-                message += f"  → Random Forest: {'Anomalous' if ml_result.get('rf_prediction') == 1 else 'Benign'} (confidence: {ml_result.get('rf_confidence', 0):.2f})\n"
+                message += f"  → Random Forest: {'**Anomalous**' if ml_result.get('rf_prediction') == 1 else 'Benign'} (confidence: {ml_result.get('rf_confidence', 0):.2f})\n"
             else:
-                message += f"  → Random Forest: {'Anomalous' if ml_result.get('rf_prediction') == 1 else 'Benign'}\n"
+                message += f"  → Random Forest: {'**Anomalous**' if ml_result.get('rf_prediction') == 1 else 'Benign'}\n"
                 
             # XGBoost (if available)
             if 'xgb_prediction' in ml_result:
                 if 'xgb_confidence' in ml_result:
-                    message += f"  → XGBoost: {'Anomalous' if ml_result.get('xgb_prediction') == 1 else 'Benign'} (confidence: {ml_result.get('xgb_confidence', 0):.2f})\n"
+                    message += f"  → XGBoost: {'**Anomalous**' if ml_result.get('xgb_prediction') == 1 else 'Benign'} (confidence: {ml_result.get('xgb_confidence', 0):.2f})\n"
                 else:
-                    message += f"  → XGBoost: {'Anomalous' if ml_result.get('xgb_prediction') == 1 else 'Benign'}\n"
+                    message += f"  → XGBoost: {'**Anomalous**' if ml_result.get('xgb_prediction') == 1 else 'Benign'}\n"
             
             # Add statistical anomaly details
             if stat_result.get('details') and len(stat_result.get('details', [])) > 0:
@@ -778,6 +770,11 @@ class HybridNIDS:
                 if behavioral_features.get('brute_force_score', 0) > 0.5:
                     message += f"  → Brute force activity detected (score: {behavioral_features.get('brute_force_score', 0):.2f})\n"
                     message += f"     Auth failures: {behavioral_features.get('auth_failures_per_second', 0):.2f} per second\n"
+                    
+                # Add SSH-specific metrics
+                if is_ssh and 'ssh_auth_failures' in behavioral_features:
+                    message += f"  → SSH Auth Failures: {behavioral_features.get('ssh_auth_failures', 0)}\n"
+                    message += f"     Rate: {behavioral_features.get('ssh_auth_failures_per_second', 0):.2f} per second\n"
                 
                 # Add volume anomalies
                 if behavioral_features.get('volume_anomaly_score', 0) > 0.5:
@@ -795,7 +792,9 @@ class HybridNIDS:
                 port = int(alert_data.get('dst_port', 0) or 0)
                 
                 if port == 22:
-                    message += "  • Potential SSH brute force or unauthorized access attempt\n"
+                    message += "  • SSH brute force attempt or unauthorized access\n"
+                    if 'recent_ssh_failures' in alert_data and alert_data['recent_ssh_failures'] > 2:
+                        message += f"  • Multiple SSH auth failures ({alert_data['recent_ssh_failures']}) detected - strong indication of brute force\n"
                 elif port == 23:
                     message += "  • Telnet activity - insecure protocol potentially indicating compromise\n"
                 elif port == 3389:
@@ -867,6 +866,11 @@ class HybridNIDS:
             logger.info(f"DNS: {session.get('dns_event_count', 0)} events")
         if session.get('tls_event_count', 0) > 0:
             logger.info(f"TLS: {session.get('tls_event_count', 0)} events")
+        if session.get('ssh_event_count', 0) > 0:
+            logger.info(f"SSH: {session.get('ssh_event_count', 0)} events")
+            # Check for SSH auth failures
+            if session.get('ssh_auth_failure', False):
+                logger.info("SSH AUTH FAILURE DETECTED")
         
         # Traffic volume
         logger.info(f"Bytes: {alert_data.get('total_bytes', 0):,}, Packets: {alert_data.get('total_packets', 0):,}")
@@ -877,6 +881,14 @@ class HybridNIDS:
         # Special cases
         if alert_data.get('zero_byte_pattern', False):
             logger.info("ZERO-BYTE PATTERN DETECTED - Possible scanning or brute force")
+        
+        # SSH-specific info
+        if 'is_ssh' in alert_data and alert_data['is_ssh']:
+            logger.info("SSH CONNECTION DETECTED")
+            if 'ssh_auth_failure' in alert_data and alert_data['ssh_auth_failure']:
+                logger.info("SSH AUTHENTICATION FAILURE")
+            if 'recent_ssh_failures' in alert_data:
+                logger.info(f"Recent SSH Auth Failures: {alert_data['recent_ssh_failures']}")
         
         # Behavioral information
         behavioral_features = alert_data.get('behavioral_features', {})
@@ -910,6 +922,8 @@ class HybridNIDS:
         processed_events = 0
         finalized_sessions = 0
         anomalies_detected = 0
+        ssh_sessions = 0
+        
         try:
             # Process the file line by line
             with open(file_path, 'r') as f:
@@ -925,6 +939,12 @@ class HybridNIDS:
                             flagged_by_suricata += 1
                             continue
                         
+                        # Check if this is an SSH event (for tracking)
+                        is_ssh = False
+                        if 'dest_port' in entry and entry['dest_port'] == 22:
+                            is_ssh = True
+                            ssh_sessions += 1
+                            
                         # Process entry using parser
                         event = self.parser.process_line(entry)
                         
@@ -950,8 +970,8 @@ class HybridNIDS:
                         logger.error(traceback.format_exc())
                         continue
                     
-                    # Periodically clean up session and behavioral data
-                    if total_entries % 1000 == 0:
+                    # Periodically clean up session and behavioral data (more frequently)
+                    if total_entries % 500 == 0:  # Check more often (every 500 entries)
                         # Clean up expired sessions
                         expired_sessions = self.session_manager.cleanup_expired_sessions()
                         
@@ -966,7 +986,8 @@ class HybridNIDS:
                         self.behavioral_analyzer.cleanup()
                         
                         # Print progress update
-                        logger.info(f"Processed {total_entries} entries, {finalized_sessions} finalized sessions, {anomalies_detected} anomalies")
+                        if total_entries % 5000 == 0:  # Less frequent updates to console
+                            logger.info(f"Processed {total_entries} entries, {finalized_sessions} finalized sessions, {anomalies_detected} anomalies, {ssh_sessions} SSH sessions")
             
             # Final cleanup of any remaining sessions
             expired_sessions = self.session_manager.cleanup_expired_sessions()
@@ -982,6 +1003,7 @@ class HybridNIDS:
             logger.info(f"Entries flagged by Suricata: {flagged_by_suricata}")
             logger.info(f"Processed events: {processed_events}")
             logger.info(f"Finalized sessions: {finalized_sessions}")
+            logger.info(f"SSH sessions: {ssh_sessions}")
             logger.info(f"Anomalies detected: {anomalies_detected}")
             logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
             logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")
@@ -993,6 +1015,7 @@ class HybridNIDS:
                 logger.info(f"Entries flagged by Suricata: {flagged_by_suricata}")
                 logger.info(f"Processed events: {processed_events}")
                 logger.info(f"Finalized sessions: {finalized_sessions}")
+                logger.info(f"SSH sessions: {ssh_sessions}")
                 logger.info(f"Anomalies detected: {anomalies_detected}")
                 logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
                 logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")
@@ -1014,8 +1037,13 @@ class HybridNIDS:
         processed_events = 0
         finalized_sessions = 0
         anomalies_detected = 0
+        ssh_sessions = 0
         last_cleanup = time.time()
         last_stats_update = time.time()
+        
+        # More frequent cleanups for SSH sessions
+        ssh_cleanup_interval = 5  # Check SSH sessions every 5 seconds
+        last_ssh_cleanup = time.time()
         
         try:
             while True:
@@ -1039,6 +1067,12 @@ class HybridNIDS:
                                     flagged_by_suricata += 1
                                     continue
                                 
+                                # Check if this is an SSH event
+                                is_ssh = False
+                                if 'dest_port' in entry and str(entry['dest_port']) == '22':
+                                    is_ssh = True
+                                    ssh_sessions += 1
+                                    
                                 # Process entry using parser
                                 event = self.parser.process_line(entry)
                                 
@@ -1064,9 +1098,25 @@ class HybridNIDS:
                         # Update position
                         position = end_position
                 
-                # Check if cleanup is needed
+                # More frequent checks for SSH sessions
                 current_time = time.time()
-                if current_time - last_cleanup > 60:  # Cleanup every minute
+                if current_time - last_ssh_cleanup > ssh_cleanup_interval:
+                    # Check for SSH sessions that need to be finalized
+                    ssh_sessions = self.session_manager.get_sessions_by_dest_port(22)
+                    if ssh_sessions:
+                        for ssh_session in ssh_sessions:
+                            if ssh_session.needs_immediate_processing:
+                                logger.debug(f"Processing SSH session that needs immediate analysis")
+                                ssh_session.finalize()
+                                result = self.flow_finalizer.process_session(ssh_session)
+                                finalized_sessions += 1
+                                if result.get('is_anomalous', False):
+                                    anomalies_detected += 1
+                    
+                    last_ssh_cleanup = current_time
+                
+                # Check if regular cleanup is needed
+                if current_time - last_cleanup > 15:  # Cleanup every 15 seconds (more frequent)
                     # Clean up expired sessions
                     expired_sessions = self.session_manager.cleanup_expired_sessions()
                     
@@ -1085,20 +1135,27 @@ class HybridNIDS:
                 # Print status update every minute
                 if current_time - last_stats_update > 60:
                     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    logger.info(f"[{now}] Processed: {processed_events} | Sessions: {finalized_sessions} | Alerts: {anomalies_detected}")
+                    logger.info(f"[{now}] Processed: {processed_events} | Sessions: {finalized_sessions} | Alerts: {anomalies_detected} | SSH: {ssh_sessions}")
                     
                     # Check for suspicious IPs based on behavioral analysis
                     top_anomalous = self.behavioral_analyzer.get_top_anomalous_ips(5)
                     if top_anomalous:
                         logger.info("Top suspicious IPs from behavioral analysis:")
                         for ip, score in top_anomalous:
-                            if score > 0.7:  # Only show highly suspicious IPs
+                            if score > 0.5:  # Lower threshold to highlight more suspicious IPs
                                 logger.info(f"  - {ip}: Score {score:.2f}")
+                    
+                    # Check for brute force activity
+                    brute_force_ips = self.behavioral_analyzer.get_brute_force_activity(0.3)  # Lower threshold
+                    if brute_force_ips:
+                        logger.info("Potential brute force activity:")
+                        for ip, score in brute_force_ips:
+                            logger.info(f"  - {ip}: Score {score:.2f}")
                     
                     last_stats_update = current_time
                 
-                # Sleep for a second
-                time.sleep(1)
+                # Sleep for a short time
+                time.sleep(0.5)  # Faster polling (0.5s instead of 1s)
         
         except KeyboardInterrupt:
             # Print summary when stopped
@@ -1107,6 +1164,7 @@ class HybridNIDS:
             logger.info(f"Entries flagged by Suricata: {flagged_by_suricata}")
             logger.info(f"Processed events: {processed_events}")
             logger.info(f"Finalized sessions: {finalized_sessions}")
+            logger.info(f"SSH sessions: {ssh_sessions}")
             logger.info(f"Anomalies detected: {anomalies_detected}")
             logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
             logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")

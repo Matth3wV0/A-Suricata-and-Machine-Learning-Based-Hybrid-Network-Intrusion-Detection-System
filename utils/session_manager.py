@@ -69,6 +69,8 @@ class SuricataSession:
     # SSH data
     ssh_client_versions: List[str] = field(default_factory=list)
     ssh_server_versions: List[str] = field(default_factory=list)
+    ssh_auth_success: bool = False
+    ssh_auth_failure: bool = False  # Added flag for SSH auth failure
     
     # Event counts
     http_event_count: int = 0
@@ -86,6 +88,7 @@ class SuricataSession:
     is_complete: bool = False
     has_app_data: bool = False
     last_updated: float = field(default_factory=time.time)
+    needs_immediate_processing: bool = False  # Flag for sessions that need immediate analysis
     
     def update_from_flow(self, flow: SuricataFlow) -> None:
         """Update session with flow information"""
@@ -109,6 +112,10 @@ class SuricataSession:
             self.duration = float(flow.dur)
             
         self.last_updated = time.time()
+        
+        # Check if this session should be immediately processed
+        if self.ssh_auth_failure or (self.appproto == 'ssh' and self.state in ['rejected', 'failed']):
+            self.needs_immediate_processing = True
     
     def update_from_http(self, http: SuricataHTTP) -> None:
         """Update session with HTTP information"""
@@ -210,8 +217,22 @@ class SuricataSession:
             
         if ssh.server and ssh.server not in self.ssh_server_versions:
             self.ssh_server_versions.append(ssh.server)
-            
+        
+        # Check for authentication success/failure
+        if hasattr(ssh, 'auth_success') and ssh.auth_success:
+            self.ssh_auth_success = True
+        
+        # Extract auth status from event
+        if hasattr(ssh, 'auth_success') and ssh.auth_success == "false":
+            self.ssh_auth_failure = True
+            self.needs_immediate_processing = True
+        
         self.last_updated = time.time()
+        
+        # SSH sessions should be marked for immediate processing
+        # This ensures we detect brute force attempts quickly
+        if self.dport == "22" or self.sport == "22":
+            self.needs_immediate_processing = True
     
     def update_from_file(self, file: SuricataFile) -> None:
         """Update session with file information"""
@@ -278,6 +299,8 @@ class SuricataSession:
             
             # SSH info
             'ssh_event_count': self.ssh_event_count,
+            'ssh_auth_success': self.ssh_auth_success,
+            'ssh_auth_failure': self.ssh_auth_failure,  # Add auth failure info
             
             # File info
             'file_event_count': self.file_event_count,
@@ -294,19 +317,27 @@ class SuricataSession:
 class SessionManager:
     """Manages flow sessions and aggregates related events"""
     
-    def __init__(self, session_timeout: int = 60, max_sessions: int = 10000):
+    def __init__(self, session_timeout: int = 60, max_sessions: int = 10000, 
+                ssh_session_timeout: int = 15):  # Add SSH-specific timeout (shorter)
         """Initialize session manager
         
         Args:
             session_timeout: Time in seconds before a session is considered expired
             max_sessions: Maximum number of sessions to keep in memory
+            ssh_session_timeout: Timeout for SSH sessions specifically (shorter)
         """
         self.session_timeout = session_timeout
+        self.ssh_session_timeout = ssh_session_timeout  # New parameter for SSH sessions
         self.max_sessions = max_sessions
         self.sessions: Dict[str, SuricataSession] = {}
         self.closed_sessions: List[SuricataSession] = []
         self.session_by_ip: Dict[str, Set[str]] = defaultdict(set)
         self.session_by_dest_port: Dict[int, Set[str]] = defaultdict(set)
+        
+        # Track SSH auth failures per source IP (for cross-session brute force detection)
+        self.ssh_auth_failures: Dict[str, List[float]] = defaultdict(list)
+        self.last_ssh_cleanup = time.time()
+        self.ssh_cleanup_interval = 30  # Clean up SSH tracking every 30 seconds
         
         # Statistics
         self.stats = {
@@ -319,8 +350,14 @@ class SessionManager:
             'dns_events': 0,
             'tls_events': 0,
             'ssh_events': 0,
-            'file_events': 0
+            'file_events': 0,
+            'ssh_auth_failures': 0,  # Track SSH auth failures specifically
+            'early_processed_sessions': 0  # Track sessions processed early
         }
+        
+        # Last cleanup time tracking
+        self.last_cleanup = time.time()
+        self.cleanup_interval = 10  # Reduced interval to clean up more frequently
     
     def process_event(self, event: Any) -> Optional[SuricataSession]:
         """Process Suricata event and update corresponding session
@@ -374,6 +411,18 @@ class SessionManager:
                     finalized_session = session
                     self._close_session(flow_id)
                     
+                # Special handling for SSH sessions that need immediate processing
+                elif session.needs_immediate_processing or (
+                    session.appproto == 'ssh' and  # SSH protocol
+                    session.dport == "22" and      # Standard SSH port
+                    not session.is_complete        # Not yet finalized
+                ):
+                    # Finalize SSH sessions that need immediate analysis
+                    session.finalize()
+                    finalized_session = session
+                    self._close_session(flow_id)
+                    self.stats['early_processed_sessions'] += 1
+                    
             elif isinstance(event, SuricataHTTP):
                 session.update_from_http(event)
                 self.stats['http_events'] += 1
@@ -390,9 +439,39 @@ class SessionManager:
                 session.update_from_ssh(event)
                 self.stats['ssh_events'] += 1
                 
+                # Check for SSH auth failure to track for brute force detection
+                if hasattr(event, 'auth_success') and event.auth_success == "false":
+                    # Record timestamp of auth failure for this source IP
+                    self.ssh_auth_failures[event.saddr].append(time.time())
+                    self.stats['ssh_auth_failures'] += 1
+                    
+                    # Immediately finalize SSH sessions with auth failures
+                    # This ensures we don't wait for timeout to detect brute force
+                    session.finalize()
+                    finalized_session = session
+                    self._close_session(flow_id)
+                    self.stats['early_processed_sessions'] += 1
+                
             elif isinstance(event, SuricataFile):
                 session.update_from_file(event)
                 self.stats['file_events'] += 1
+        
+        # Check for brute force by counting recent auth failures
+        current_time = time.time()
+        # Only clean up SSH failure tracking periodically to avoid overhead
+        if current_time - self.last_ssh_cleanup > self.ssh_cleanup_interval:
+            self._cleanup_ssh_auth_failures()
+            self.last_ssh_cleanup = current_time
+        
+        # Periodically check for expired sessions (reduced interval)
+        if current_time - self.last_cleanup > self.cleanup_interval:
+            expired_sessions = self.cleanup_expired_sessions()
+            self.last_cleanup = current_time
+            
+            # If we have finalized sessions and the current event didn't finalize a session,
+            # return the first finalized session
+            if expired_sessions and not finalized_session:
+                finalized_session = expired_sessions[0]
         
         return finalized_session
     
@@ -410,6 +489,28 @@ class SessionManager:
         flow_ids = self.session_by_dest_port.get(port, set())
         return [self.sessions[fid] for fid in flow_ids if fid in self.sessions]
     
+    def get_ssh_auth_failures(self, ip_addr: str, window: int = 60) -> int:
+        """Get the number of SSH auth failures for an IP in the last window seconds"""
+        current_time = time.time()
+        failures = self.ssh_auth_failures.get(ip_addr, [])
+        return sum(1 for t in failures if current_time - t <= window)
+    
+    def _cleanup_ssh_auth_failures(self) -> None:
+        """Clean up old SSH auth failure records"""
+        current_time = time.time()
+        window = 300  # Keep records for 5 minutes
+        
+        for ip_addr in list(self.ssh_auth_failures.keys()):
+            # Keep only recent failures
+            self.ssh_auth_failures[ip_addr] = [
+                t for t in self.ssh_auth_failures[ip_addr] 
+                if current_time - t <= window
+            ]
+            
+            # Remove empty entries
+            if not self.ssh_auth_failures[ip_addr]:
+                del self.ssh_auth_failures[ip_addr]
+    
     def cleanup_expired_sessions(self) -> List[SuricataSession]:
         """Cleanup expired sessions
         
@@ -422,7 +523,16 @@ class SessionManager:
         
         # Find expired sessions
         for flow_id, session in self.sessions.items():
-            if current_time - session.last_updated > self.session_timeout:
+            # Use SSH-specific timeout for SSH sessions
+            if session.appproto == 'ssh' or session.dport == "22" or session.sport == "22":
+                timeout = self.ssh_session_timeout
+            else:
+                timeout = self.session_timeout
+                
+            if current_time - session.last_updated > timeout:
+                expired_flow_ids.append(flow_id)
+            # Also check for sessions that need immediate processing
+            elif session.needs_immediate_processing:
                 expired_flow_ids.append(flow_id)
         
         # Close expired sessions
@@ -431,7 +541,11 @@ class SessionManager:
             session.finalize()
             finalized_sessions.append(session)
             self._close_session(flow_id)
-            self.stats['expired_sessions'] += 1
+            
+            if session.needs_immediate_processing:
+                self.stats['early_processed_sessions'] += 1
+            else:
+                self.stats['expired_sessions'] += 1
         
         # Enforce max sessions limit if needed
         if len(self.sessions) > self.max_sessions:
