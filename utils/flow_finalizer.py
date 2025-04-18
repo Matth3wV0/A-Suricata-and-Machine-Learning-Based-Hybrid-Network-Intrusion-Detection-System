@@ -58,16 +58,11 @@ class FlowFinalizer:
             'short_duration_sessions': 0,
             'analyzed_sessions': 0,
             'anomalous_sessions': 0,
-            'alerts_generated': 0,
-            'ssh_sessions_processed': 0  # Added for SSH tracking
+            'alerts_generated': 0
         }
         
         # Keep track of recent zero-byte flows per IP
         self.zero_byte_flows = {}
-        
-        # Keep track of SSH brute force attempts per source IP
-        self.ssh_auth_failures = {}
-        
         self.last_cleanup = time.time()
     
     def process_session(self, session: SuricataSession) -> Dict[str, Any]:
@@ -85,15 +80,6 @@ class FlowFinalizer:
         # Update statistics
         self.stats['processed_sessions'] += 1
         
-        # Check if this is a SSH session
-        is_ssh = (session_dict.get('appproto') == 'ssh' or 
-                 session_dict.get('dport') == "22" or 
-                 session_dict.get('sport') == "22")
-        
-        if is_ssh:
-            self.stats['ssh_sessions_processed'] += 1
-            logger.debug(f"Processing SSH session from {session_dict.get('saddr')} to {session_dict.get('daddr')}")
-        
         # Check if this is a zero-byte flow
         total_bytes = session_dict.get('total_fwd_bytes', 0) + session_dict.get('total_bwd_bytes', 0)
         if total_bytes == 0:
@@ -102,10 +88,11 @@ class FlowFinalizer:
             if result:
                 return result
         
-        # Check duration - but don't skip SSH sessions even if they're short
+        # Check duration
         duration = session_dict.get('duration', 0)
-        if duration < self.min_session_duration and self.min_session_duration > 0 and not is_ssh:
+        if duration < self.min_session_duration and self.min_session_duration > 0:
             self.stats['short_duration_sessions'] += 1
+            # Continue processing anyway - we'll handle it differently
         
         # Process normally
         self.stats['analyzed_sessions'] += 1
@@ -123,47 +110,12 @@ class FlowFinalizer:
         else:
             features = base_features
         
-        # Check for SSH auth failures and fast-track detection
-        ssh_auth_failure = False
-        if is_ssh:
-            # Get SSH-specific info
-            app_info = session_dict.get('ssh_auth_failure', False)
-            
-            # If this is a SSH session with auth failure, increase anomaly likelihood
-            if app_info or session_dict.get('state') in ['rejected', 'failed']:
-                ssh_auth_failure = True
-                # Track auth failures by source IP
-                src_ip = session_dict.get('saddr', '')
-                if src_ip not in self.ssh_auth_failures:
-                    self.ssh_auth_failures[src_ip] = []
-                
-                self.ssh_auth_failures[src_ip].append(time.time())
-                
-                # Check for brute force pattern
-                recent_failures = self._count_recent_ssh_failures(src_ip)
-                if recent_failures >= 3:  # 3+ failures in a short time
-                    logger.warning(f"Detected SSH brute force attempt from {src_ip}: {recent_failures} recent failures")
-        
         # Run anomaly detection
         ml_result, stat_result, combined_score = self.anomaly_detector.detect_anomalies(features)
         
-        # For SSH sessions with auth failures, increase anomaly score
-        if ssh_auth_failure:
-            src_ip = session_dict.get('saddr', '')
-            recent_failures = self._count_recent_ssh_failures(src_ip)
-            
-            # Adjust score based on number of recent failures
-            if recent_failures >= 5:
-                combined_score = max(combined_score, 0.9)  # Very likely brute force
-            elif recent_failures >= 3:
-                combined_score = max(combined_score, 0.7)  # Likely brute force
-            elif recent_failures >= 2:
-                combined_score = max(combined_score, 0.5)  # Possibly brute force
-        
         # Determine if anomalous
         is_anomalous = (ml_result.get('is_anomalous', False) or
-                        stat_result.get('is_anomalous', False) or
-                        combined_score >= 0.5)
+                        stat_result.get('is_anomalous', False))
         
         # Construct result
         result = {
@@ -186,13 +138,6 @@ class FlowFinalizer:
             'session': session_dict  # Include full session for reference
         }
         
-        # For SSH sessions, add specific details
-        if is_ssh:
-            result['is_ssh'] = True
-            result['ssh_auth_failure'] = ssh_auth_failure
-            if src_ip in self.ssh_auth_failures:
-                result['recent_ssh_failures'] = self._count_recent_ssh_failures(src_ip)
-        
         # Generate alert if anomalous
         if is_anomalous:
             self.stats['anomalous_sessions'] += 1
@@ -212,25 +157,6 @@ class FlowFinalizer:
         
         return result
     
-    def _count_recent_ssh_failures(self, src_ip: str, window: int = 60) -> int:
-        """Count recent SSH auth failures for a source IP
-        
-        Args:
-            src_ip: Source IP address 
-            window: Time window in seconds (default: 60s)
-            
-        Returns:
-            Number of failures in the time window
-        """
-        if src_ip not in self.ssh_auth_failures:
-            return 0
-        
-        now = time.time()
-        cutoff = now - window
-        
-        # Count failures after cutoff time
-        return sum(1 for t in self.ssh_auth_failures[src_ip] if t > cutoff)
-    
     def _handle_zero_byte_flow(self, session_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Special handling for zero-byte flows to detect brute force patterns
         
@@ -249,9 +175,6 @@ class FlowFinalizer:
         if not src_ip or not dst_ip or not dst_port:
             return None
         
-        # Check if this is SSH (port 22)
-        is_ssh = (dst_port == "22" or session_dict.get('appproto') == 'ssh')
-        
         # Create a key for this destination
         dest_key = f"{dst_ip}:{dst_port}:{proto}"
         
@@ -264,19 +187,15 @@ class FlowFinalizer:
             self.zero_byte_flows[src_ip][dest_key] = {
                 'count': 0,
                 'first_seen': time.time(),
-                'last_seen': time.time(),
-                'is_ssh': is_ssh
+                'last_seen': time.time()
             }
         
         # Update tracking
         self.zero_byte_flows[src_ip][dest_key]['count'] += 1
         self.zero_byte_flows[src_ip][dest_key]['last_seen'] = time.time()
         
-        # Use lower threshold for SSH (2 instead of 3)
-        threshold = 2 if is_ssh else self.zero_byte_threshold
-        
         # Check for suspicious pattern
-        if self.zero_byte_flows[src_ip][dest_key]['count'] >= threshold:
+        if self.zero_byte_flows[src_ip][dest_key]['count'] >= self.zero_byte_threshold:
             # Calculate rate (flows per second)
             time_span = (self.zero_byte_flows[src_ip][dest_key]['last_seen'] - 
                         self.zero_byte_flows[src_ip][dest_key]['first_seen'])
@@ -287,11 +206,8 @@ class FlowFinalizer:
             
             rate = self.zero_byte_flows[src_ip][dest_key]['count'] / time_span
             
-            # Lower rate threshold for SSH (0.5 instead of 1.0)
-            rate_threshold = 0.5 if is_ssh else 1.0
-            
-            # Check if rate is suspicious
-            if rate > rate_threshold:
+            # Check if rate is suspicious (more than 1 per second)
+            if rate > 1.0:
                 # Create result for suspicious zero-byte pattern
                 result = {
                     'flow_id': session_dict.get('flow_id', ''),
@@ -315,16 +231,6 @@ class FlowFinalizer:
                     'session': session_dict
                 }
                 
-                # For SSH, add SSH-specific details
-                if is_ssh:
-                    result['is_ssh'] = True
-                    # If SSH, record as auth failure
-                    if src_ip not in self.ssh_auth_failures:
-                        self.ssh_auth_failures[src_ip] = []
-                    
-                    self.ssh_auth_failures[src_ip].append(time.time())
-                    result['recent_ssh_failures'] = self._count_recent_ssh_failures(src_ip)
-                
                 # Generate alert
                 if self.alert_callback:
                     self.alert_callback(result)
@@ -345,7 +251,6 @@ class FlowFinalizer:
         """Clean up old tracking data"""
         current_time = time.time()
         cutoff = current_time - 600  # 10 minutes
-        ssh_cutoff = current_time - 300  # 5 minutes for SSH
         
         # Clean up zero-byte flow tracking
         ips_to_remove = []
@@ -355,10 +260,7 @@ class FlowFinalizer:
             dest_to_remove = []
             
             for dest_key, data in destinations.items():
-                is_ssh = data.get('is_ssh', False)
-                dest_cutoff = ssh_cutoff if is_ssh else cutoff
-                
-                if data['last_seen'] < dest_cutoff:
+                if data['last_seen'] < cutoff:
                     dest_to_remove.append(dest_key)
             
             # Remove old destinations
@@ -372,15 +274,6 @@ class FlowFinalizer:
         # Remove empty IPs
         for src_ip in ips_to_remove:
             del self.zero_byte_flows[src_ip]
-            
-        # Clean up SSH auth failures
-        for src_ip in list(self.ssh_auth_failures.keys()):
-            self.ssh_auth_failures[src_ip] = [
-                t for t in self.ssh_auth_failures[src_ip] if t > ssh_cutoff
-            ]
-            
-            if not self.ssh_auth_failures[src_ip]:
-                del self.ssh_auth_failures[src_ip]
     
     def _save_result(self, result: Dict[str, Any]) -> None:
         """Save result to CSV file"""

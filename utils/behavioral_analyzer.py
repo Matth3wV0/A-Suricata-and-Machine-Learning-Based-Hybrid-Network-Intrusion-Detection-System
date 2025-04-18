@@ -58,10 +58,6 @@ class IPBehavior:
     tls_failures: int = 0
     ssh_attempts: int = 0
     
-    # SSH-specific metrics for brute force detection
-    ssh_auth_failures: int = 0
-    ssh_auth_attempts_window: List[float] = field(default_factory=list)
-    
     # Connection state tracking
     connection_states: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
     
@@ -153,14 +149,6 @@ class IPBehavior:
         # SSH metrics
         self.ssh_attempts += app_info.get('ssh_attempts', 0)
         
-        # Enhanced SSH auth failure tracking for brute force
-        ssh_auth_failures = app_info.get('ssh_auth_failures', 0)
-        if ssh_auth_failures > 0:
-            self.ssh_auth_failures += ssh_auth_failures
-            # Track timestamps of auth failures for rate calculation
-            for _ in range(ssh_auth_failures):
-                self.ssh_auth_attempts_window.append(now)
-        
         # Track connection states
         if state:
             self.connection_states[state] += 1
@@ -171,19 +159,6 @@ class IPBehavior:
             self.failed_auth_count += auth_failures
             service = app_proto if app_proto else f"{proto}-{dst_port}"
             self.auth_attempt_window.append((now, service, auth_failures))
-        
-        # Check for indicators of brute force in SSH connections
-        if dst_port == 22 or app_proto == 'ssh':
-            # Special handling for SSH sessions with multiple auth failures
-            if self.ssh_auth_failures > 0:
-                # Immediately update brute force score
-                self._update_brute_force_score()
-            
-            # For SSH specifically, check for failed connections
-            if state in ['rejected', 'failed']:
-                self.ssh_auth_failures += 1
-                self.ssh_auth_attempts_window.append(now)
-                self._update_brute_force_score()
         
         # Update scan and behavioral scores
         self._update_behavioral_scores()
@@ -198,8 +173,7 @@ class IPBehavior:
             'tls_handshakes': 0,
             'tls_failures': 0,
             'ssh_attempts': 0,
-            'auth_failures': 0,
-            'ssh_auth_failures': 0  # Added specific SSH auth failure tracking
+            'auth_failures': 0
         }
         
         # HTTP metrics
@@ -239,28 +213,14 @@ class IPBehavior:
             if session_dict.get('state') in ['rejected', 'failed']:
                 app_info['tls_failures'] += 1
         
-        # SSH metrics - Enhanced for brute force detection
+        # SSH metrics
         ssh_event_count = session_dict.get('ssh_event_count', 0)
         
         if ssh_event_count > 0:
             app_info['ssh_attempts'] = ssh_event_count
             
-            # Check multiple indicators for SSH auth failures
-            # 1. Direct SSH auth failure from session
-            if session_dict.get('ssh_auth_failure', False):
-                app_info['ssh_auth_failures'] += 1
-                app_info['auth_failures'] += 1
-            
-            # 2. Connection state indicating failure
-            elif session_dict.get('state') in ['rejected', 'failed']:
-                # If SSH session failed, count as auth failure
-                app_info['ssh_auth_failures'] += 1
-                app_info['auth_failures'] += 1
-            
-            # 3. Check for short-lived SSH sessions (potential failed auth)
-            elif session_dict.get('duration', 0) < 1.0 and session_dict.get('total_bytes', 0) < 1000:
-                # Short SSH connections with minimal data are likely auth failures
-                app_info['ssh_auth_failures'] += 1
+            # Detect SSH failures
+            if session_dict.get('state') in ['rejected', 'failed']:
                 app_info['auth_failures'] += 1
         
         return app_info
@@ -280,44 +240,6 @@ class IPBehavior:
         
         # Clean up auth attempts
         self.auth_attempt_window = [(t, svc, cnt) for t, svc, cnt in self.auth_attempt_window if t > cutoff]
-        
-        # Clean up SSH auth attempts - using shorter window for SSH (1 minute)
-        ssh_cutoff = now - 60  # 1 minute window for SSH auth failures
-        self.ssh_auth_attempts_window = [t for t in self.ssh_auth_attempts_window if t > ssh_cutoff]
-    
-    def _update_brute_force_score(self) -> None:
-        """Update brute force detection score based on auth failures rate"""
-        # Get the current time
-        now = time.time()
-        
-        # Consider only auth attempts in the last minute (more aggressive for SSH)
-        window = 60  # 1 minute
-        cutoff = now - window
-        
-        # Count failures in window
-        recent_failures = sum(1 for t in self.ssh_auth_attempts_window if t > cutoff)
-        
-        # Calculate failures per second
-        failures_per_second = recent_failures / window
-        
-        # Set thresholds for brute force detection
-        # More aggressive thresholds for SSH brute force
-        if failures_per_second >= 0.5:  # 30+ failures per minute
-            self.brute_force_anomaly_score = 0.95
-        elif failures_per_second >= 0.25:  # 15+ failures per minute
-            self.brute_force_anomaly_score = 0.85
-        elif failures_per_second >= 0.1:  # 6+ failures per minute
-            self.brute_force_anomaly_score = 0.75
-        elif failures_per_second >= 0.05:  # 3+ failures per minute
-            self.brute_force_anomaly_score = 0.65
-        elif recent_failures >= 2:  # At least 2 failures in the last minute
-            self.brute_force_anomaly_score = 0.55
-        
-        # Ensure overall anomaly score is updated
-        self.overall_anomaly_score = max(
-            self.overall_anomaly_score,
-            self.brute_force_anomaly_score
-        )
     
     def _update_behavioral_scores(self) -> None:
         """Update behavioral anomaly scores"""
@@ -350,17 +272,18 @@ class IPBehavior:
         # Combined scan score
         self.scan_anomaly_score = max(self.port_scan_score, self.host_scan_score)
         
-        # Calculate brute force score based on all auth failures
+        # Calculate brute force score based on auth failures
         auth_failures_by_service = defaultdict(int)
         for _, service, count in self.auth_attempt_window:
             auth_failures_by_service[service] += count
         
         max_failures = max(auth_failures_by_service.values()) if auth_failures_by_service else 0
         
-        # Use existing brute force score if it's higher (from SSH-specific detection)
-        # Otherwise calculate from general auth failures
-        if max_failures > 3 and self.brute_force_anomaly_score < 0.5:
+        # Brute force score based on number of failures to same service
+        if max_failures > 3:
             self.brute_force_anomaly_score = min(1.0, max_failures / 20)
+        else:
+            self.brute_force_anomaly_score = 0
         
         # Calculate volume anomaly score
         bytes_in_window = sum(b for _, b in self.bytes_sent_window)
@@ -392,11 +315,7 @@ class IPBehavior:
     
     def get_behavioral_features(self) -> Dict[str, float]:
         """Get behavioral features for machine learning"""
-        # Ensure scores are up to date - first for brute force
-        if len(self.ssh_auth_attempts_window) > 0:
-            self._update_brute_force_score()
-        
-        # Then update all scores
+        # Ensure scores are up to date
         self._update_behavioral_scores()
         
         window_duration = time.time() - max(self.first_seen, time.time() - self.window_size)
@@ -424,10 +343,6 @@ class IPBehavior:
             'dns_failure_ratio': self.dns_failures / max(1, self.dns_queries),
             'tls_failure_ratio': self.tls_failures / max(1, self.tls_handshakes),
             'auth_failures_per_second': self.failed_auth_count / window_duration,
-            
-            # SSH-specific metrics
-            'ssh_auth_failures': self.ssh_auth_failures,
-            'ssh_auth_failures_per_second': len(self.ssh_auth_attempts_window) / min(window_duration, 60),
             
             # Connection states
             'rejected_ratio': self.connection_states.get('rejected', 0) / max(1, self.total_flows),
@@ -463,9 +378,6 @@ class BehavioralAnalyzer:
         # IP behavior tracking
         self.ip_behaviors: Dict[str, IPBehavior] = {}
         
-        # SSH auth failure tracking across sessions
-        self.ssh_auth_failures: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
-        
         # Last cleanup time
         self.last_cleanup = time.time()
     
@@ -486,39 +398,6 @@ class BehavioralAnalyzer:
         if not src_ip:
             return None
         
-        # Get destination information
-        dst_ip = session_dict.get('daddr', '')
-        try:
-            dst_port = int(session_dict.get('dport', 0))
-        except (ValueError, TypeError):
-            dst_port = 0
-        
-        # Get protocol information
-        proto = session_dict.get('proto', '')
-        app_proto = session_dict.get('appproto', '')
-        
-        # Check if this is an SSH-related session
-        is_ssh = (app_proto == 'ssh' or dst_port == 22)
-        
-        # Check for SSH auth failures across sessions
-        if is_ssh:
-            # Check for auth failure or rejected state
-            has_auth_failure = session_dict.get('ssh_auth_failure', False)
-            is_failed_state = session_dict.get('state') in ['rejected', 'failed']
-            
-            # Record SSH auth failure with timestamp and destination
-            if has_auth_failure or is_failed_state:
-                now = time.time()
-                self.ssh_auth_failures[src_ip].append((now, dst_ip))
-                
-                # Analyze auth failure patterns immediately
-                recent_failures = self._count_recent_ssh_failures(src_ip)
-                
-                # If we've seen multiple failures in a short time, trigger alert
-                # This enables instant alerting without waiting for behavior analysis
-                if recent_failures >= 3:  # 3+ failures in the last minute
-                    logger.warning(f"Detected SSH auth failure pattern for {src_ip}: {recent_failures} failures")
-        
         # Create or update IP behavior
         if src_ip not in self.ip_behaviors:
             self.ip_behaviors[src_ip] = IPBehavior(ip_addr=src_ip, window_size=self.window_size)
@@ -534,36 +413,10 @@ class BehavioralAnalyzer:
         
         # Check if behavior is anomalous
         anomaly_score = self.ip_behaviors[src_ip].overall_anomaly_score
-        
-        # Lower threshold for SSH-related sessions to detect brute force earlier
-        if is_ssh:
-            threshold = 0.3  # Lower threshold for SSH
-        else:
-            threshold = 0.5  # Standard threshold for other protocols
-            
-        if anomaly_score > threshold:
+        if anomaly_score > 0.5:  # Threshold for reporting anomalous behavior
             return self.ip_behaviors[src_ip].get_behavioral_features()
         
         return None
-    
-    def _count_recent_ssh_failures(self, ip_addr: str, window: int = 60) -> int:
-        """Count recent SSH auth failures for an IP address
-        
-        Args:
-            ip_addr: Source IP address
-            window: Time window in seconds (default: 60 seconds)
-            
-        Returns:
-            Number of failures in the time window
-        """
-        now = time.time()
-        cutoff = now - window
-        
-        # Count failures in the time window
-        failures = self.ssh_auth_failures.get(ip_addr, [])
-        recent_failures = sum(1 for t, _ in failures if t > cutoff)
-        
-        return recent_failures
     
     def get_ip_behavior(self, ip_addr: str) -> Optional[IPBehavior]:
         """Get behavior data for a specific IP address"""
@@ -604,11 +457,11 @@ class BehavioralAnalyzer:
         
         return sorted(scan_ips, key=lambda x: x[1], reverse=True)
     
-    def get_brute_force_activity(self, threshold: float = 0.5) -> List[Tuple[str, float]]:
-        """Get IPs involved in brute force activity - with lower threshold
+    def get_brute_force_activity(self, threshold: float = 0.7) -> List[Tuple[str, float]]:
+        """Get IPs involved in brute force activity
         
         Args:
-            threshold: Minimum brute force score to include (lowered for SSH)
+            threshold: Minimum brute force score to include
             
         Returns:
             List of (ip_addr, brute_force_score) tuples
@@ -639,15 +492,6 @@ class BehavioralAnalyzer:
         for ip in inactive_ips:
             del self.ip_behaviors[ip]
         
-        # Clean up SSH auth failures tracking (keep for 5 minutes)
-        ssh_cutoff = current_time - 300  # 5 minute retention
-        for ip in list(self.ssh_auth_failures.keys()):
-            self.ssh_auth_failures[ip] = [
-                (t, dst) for t, dst in self.ssh_auth_failures[ip] if t > ssh_cutoff
-            ]
-            if not self.ssh_auth_failures[ip]:
-                del self.ssh_auth_failures[ip]
-        
         # Enforce max tracked IPs limit
         if len(self.ip_behaviors) > self.max_tracked_ips:
             # Sort by last_seen (oldest first)
@@ -670,6 +514,5 @@ class BehavioralAnalyzer:
             'cleanup_interval': self.cleanup_interval,
             'time_since_cleanup': time.time() - self.last_cleanup,
             'anomalous_ips': len([ip for ip, behavior in self.ip_behaviors.items() 
-                                 if behavior.overall_anomaly_score > 0.5]),
-            'ssh_tracked_ips': len(self.ssh_auth_failures)
+                                 if behavior.overall_anomaly_score > 0.5])
         }
