@@ -532,6 +532,10 @@ class HybridNIDS:
             return None
         # Whitelist check for events
         try:
+            # Skip processing for trusted internal devices like pfSense
+            if hasattr(event, 'saddr') and event.saddr in self.service_whitelist.pfsense_interfaces:
+                return None
+                
             # Extract relevant information for whitelist checking
             if hasattr(event, 'daddr') and hasattr(event, 'dport') and hasattr(event, 'proto'):
                 try:
@@ -542,6 +546,8 @@ class HybridNIDS:
                 if dport > 0 and self.service_whitelist.is_whitelisted(event.daddr, dport, event.proto):
                     logger.debug(f"Skipping whitelisted service: {event.daddr}:{dport} ({event.proto})")
                     return None
+                
+                
         except Exception as e:
             logger.debug(f"Error in whitelist check: {e}")
             
@@ -589,7 +595,7 @@ class HybridNIDS:
             alert_message = self.format_alert(alert_data)
             
             # Log to console
-            self._log_alert(alert_data)
+            self._log_alert(alert_message)
             
             # Send to output file if specified
             if hasattr(self, 'output_file') and self.output_file:
@@ -904,83 +910,94 @@ class HybridNIDS:
         processed_events = 0
         finalized_sessions = 0
         anomalies_detected = 0
-        
-        # Process the file line by line
-        with open(file_path, 'r') as f:
-            for line in f:
-                total_entries += 1
-                
-                try:
-                    # Parse JSON
-                    entry = json.loads(line)
+        try:
+            # Process the file line by line
+            with open(file_path, 'r') as f:
+                for line in f:
+                    total_entries += 1
                     
-                    # Check if already flagged by Suricata
-                    if 'alert' in entry:
-                        flagged_by_suricata += 1
+                    try:
+                        # Parse JSON
+                        entry = json.loads(line)
+                        
+                        # Check if already flagged by Suricata
+                        if 'alert' in entry:
+                            flagged_by_suricata += 1
+                            continue
+                        
+                        # Process entry using parser
+                        event = self.parser.process_line(entry)
+                        
+                        if not event:
+                            continue
+                        
+                        processed_events += 1
+                        
+                        # Process through session manager
+                        result = self.process_suricata_event(event)
+                        
+                        if result:
+                            finalized_sessions += 1
+                            if result.get('is_anomalous', False):
+                                anomalies_detected += 1
+                    
+                    except json.JSONDecodeError:
+                        logger.warning(f"Skipping invalid JSON line: {line[:50]}...")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error processing entry: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
                         continue
                     
-                    # Process entry using parser
-                    event = self.parser.process_line(entry)
-                    
-                    if not event:
-                        continue
-                    
-                    processed_events += 1
-                    
-                    # Process through session manager
-                    result = self.process_suricata_event(event)
-                    
-                    if result:
-                        finalized_sessions += 1
-                        if result.get('is_anomalous', False):
-                            anomalies_detected += 1
-                
-                except json.JSONDecodeError:
-                    logger.warning(f"Skipping invalid JSON line: {line[:50]}...")
-                    continue
-                except Exception as e:
-                    logger.error(f"Error processing entry: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    continue
-                
-                # Periodically clean up session and behavioral data
-                if total_entries % 1000 == 0:
-                    # Clean up expired sessions
-                    expired_sessions = self.session_manager.cleanup_expired_sessions()
-                    
-                    # Process any expired sessions
-                    for session in expired_sessions:
-                        result = self.flow_finalizer.process_session(session)
-                        finalized_sessions += 1
-                        if result.get('is_anomalous', False):
-                            anomalies_detected += 1
-                    
-                    # Clean up behavioral analyzer
-                    self.behavioral_analyzer.cleanup()
-                    
-                    # Print progress update
-                    logger.info(f"Processed {total_entries} entries, {finalized_sessions} finalized sessions, {anomalies_detected} anomalies")
-        
-        # Final cleanup of any remaining sessions
-        expired_sessions = self.session_manager.cleanup_expired_sessions()
-        for session in expired_sessions:
-            result = self.flow_finalizer.process_session(session)
-            finalized_sessions += 1
-            if result.get('is_anomalous', False):
-                anomalies_detected += 1
-        
-        # Print summary
-        logger.info(f"\nAnalysis Summary:")
-        logger.info(f"Total log entries: {total_entries}")
-        logger.info(f"Entries flagged by Suricata: {flagged_by_suricata}")
-        logger.info(f"Processed events: {processed_events}")
-        logger.info(f"Finalized sessions: {finalized_sessions}")
-        logger.info(f"Anomalies detected: {anomalies_detected}")
-        logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
-        logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")
-        logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
-    
+                    # Periodically clean up session and behavioral data
+                    if total_entries % 1000 == 0:
+                        # Clean up expired sessions
+                        expired_sessions = self.session_manager.cleanup_expired_sessions()
+                        
+                        # Process any expired sessions
+                        for session in expired_sessions:
+                            result = self.flow_finalizer.process_session(session)
+                            finalized_sessions += 1
+                            if result.get('is_anomalous', False):
+                                anomalies_detected += 1
+                        
+                        # Clean up behavioral analyzer
+                        self.behavioral_analyzer.cleanup()
+                        
+                        # Print progress update
+                        logger.info(f"Processed {total_entries} entries, {finalized_sessions} finalized sessions, {anomalies_detected} anomalies")
+            
+            # Final cleanup of any remaining sessions
+            expired_sessions = self.session_manager.cleanup_expired_sessions()
+            for session in expired_sessions:
+                result = self.flow_finalizer.process_session(session)
+                finalized_sessions += 1
+                if result.get('is_anomalous', False):
+                    anomalies_detected += 1
+            
+            # Print summary
+            logger.info(f"\nAnalysis Summary:")
+            logger.info(f"Total log entries: {total_entries}")
+            logger.info(f"Entries flagged by Suricata: {flagged_by_suricata}")
+            logger.info(f"Processed events: {processed_events}")
+            logger.info(f"Finalized sessions: {finalized_sessions}")
+            logger.info(f"Anomalies detected: {anomalies_detected}")
+            logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
+            logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")
+            logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
+        except KeyboardInterrupt:
+                # Print summary when stopped
+                logger.info("\n\nAnalysis stopped.")
+                logger.info(f"Total entries: {total_entries}")
+                logger.info(f"Entries flagged by Suricata: {flagged_by_suricata}")
+                logger.info(f"Processed events: {processed_events}")
+                logger.info(f"Finalized sessions: {finalized_sessions}")
+                logger.info(f"Anomalies detected: {anomalies_detected}")
+                logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
+                logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")
+                logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
+            
     def monitor_suricata_file(self, file_path, output_file=None):
         """Monitor a Suricata JSON log file in real-time with session and behavior awareness."""
         logger.info(f"Monitoring Suricata JSON log file: {file_path}")
