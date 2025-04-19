@@ -449,6 +449,50 @@ class SessionManager:
         
         return finalized_sessions
     
+    def get_suspicious_active_sessions(self):
+        """Get active sessions that appear suspicious without waiting for finalization."""
+        suspicious_sessions = []
+        current_time = time.time()
+        
+        for flow_id, session in self.sessions.items():
+            # Skip very new sessions (less than 1 second old)
+            if current_time - session.last_updated < 1:
+                continue
+            
+            # Check for various suspicious conditions:
+            
+            # 1. Any session with application layer events (SSH, HTTP, etc.)
+            if session.http_event_count > 0 or session.dns_event_count > 0 or \
+            session.tls_event_count > 0 or session.ssh_event_count > 0:
+                suspicious_sessions.append(session)
+                continue
+                
+            # 2. High packet count but low byte count (possible scanning)
+            total_packets = session.total_fwd_packets + session.total_bwd_packets
+            total_bytes = session.total_fwd_bytes + session.total_bwd_bytes
+            if total_packets > 10 and total_bytes < 1000:
+                suspicious_sessions.append(session)
+                continue
+                
+            # 3. Very active ports (common attack targets)
+            try:
+                port = int(session.dport)
+                if port in [22, 23, 3389, 445, 25, 21, 80, 443, 8080, 3306, 1433, 5432]:
+                    # Check if it's been active for more than 5 seconds
+                    if current_time - session.last_updated > 5:
+                        suspicious_sessions.append(session)
+                        continue
+            except (ValueError, TypeError):
+                pass
+            
+            # 4. Sessions over 15 seconds old (periodic check)
+            if current_time - session.last_updated > 15:
+                suspicious_sessions.append(session)
+                continue
+        
+        return suspicious_sessions
+    
+    
     def _close_session(self, flow_id: str) -> None:
         """Close a session and move it to closed_sessions"""
         if flow_id in self.sessions:

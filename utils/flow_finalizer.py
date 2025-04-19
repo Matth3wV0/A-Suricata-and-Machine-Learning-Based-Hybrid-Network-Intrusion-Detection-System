@@ -12,7 +12,8 @@ from dataclasses import asdict
 from utils.session_manager import SuricataSession
 from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor
 from utils.anomaly_detector import AnomalyDetector
-
+import datetime
+from parso import parser
 # Setup logging
 logger = logging.getLogger('hybrid-nids')
 
@@ -64,7 +65,84 @@ class FlowFinalizer:
         # Keep track of recent zero-byte flows per IP
         self.zero_byte_flows = {}
         self.last_cleanup = time.time()
+        
+    # Add to FlowFinalizer class in flow_finalizer.py
+    def process_active_session(self, session):
+        """Process an active (not yet finalized) session.
+        
+        This is similar to process_session but designed for early detection.
+        """
+        # Convert to dict if needed
+        session_dict = session if isinstance(session, dict) else asdict(session)
+        
+        # Mark as active analysis
+        session_dict['is_active_analysis'] = True
+        
+        # Calculate duration if needed
+        if session_dict.get('duration', 0) == 0 and session_dict.get('starttime'):
+            try:
+                start_time = parser.parse(session_dict['starttime'].replace('Z', '+00:00'))
+                current_time = datetime.datetime.now(datetime.timezone.utc)
+                session_dict['duration'] = (current_time - start_time).total_seconds()
+            except Exception:
+                session_dict['duration'] = time.time() - getattr(session, 'last_updated', time.time() - 1)
+        
+        # Extract features
+        features = self.feature_extractor.extract_from_flow(session_dict)
+        
+        # Run anomaly detection with adjusted thresholds for active sessions
+        ml_result, stat_result, combined_score = self.anomaly_detector.detect_anomalies(
+            features, is_active_session=True)
+        
+        # For active sessions, we need a higher threshold to reduce false positives
+        # But for certain protocols or patterns, we can use lower thresholds
+        threshold_adjustment = 0.0
+        
+        # Adjust threshold based on protocol
+        if session_dict.get('appproto') == 'ssh':
+            threshold_adjustment = -0.1  # Lower threshold for SSH
+        elif session_dict.get('appproto') == 'http':
+            threshold_adjustment = -0.05  # Lower threshold for HTTP
+        
+        # Adjust threshold based on packet/byte patterns
+        total_packets = session_dict.get('total_fwd_packets', 0) + session_dict.get('total_bwd_packets', 0)
+        total_bytes = session_dict.get('total_fwd_bytes', 0) + session_dict.get('total_bwd_bytes', 0)
+        
+        if total_packets > 10 and total_bytes < 500:
+            # Scanner-like pattern
+            threshold_adjustment -= 0.1
+        
+        # Final decision
+        is_anomalous = combined_score > (0.7 + threshold_adjustment)
+        
+        # Construct result
+        result = {
+            'flow_id': session_dict.get('flow_id', ''),
+            'timestamp': time.time(),
+            'src_ip': session_dict.get('saddr', ''),
+            'src_port': session_dict.get('sport', ''),
+            'dst_ip': session_dict.get('daddr', ''),
+            'dst_port': session_dict.get('dport', ''),
+            'proto': session_dict.get('proto', ''),
+            'app_proto': session_dict.get('appproto', ''),
+            'duration': session_dict.get('duration', 0),
+            'total_bytes': total_bytes,
+            'total_packets': total_packets,
+            'ml_result': ml_result,
+            'stat_result': stat_result,
+            'combined_score': combined_score,
+            'is_anomalous': is_anomalous,
+            'active_session_analysis': True,
+            'session': session_dict
+        }
+        
+        # For active sessions that are anomalous, mark them for the session manager
+        if is_anomalous and hasattr(session, 'flow_id'):
+            session.potentially_anomalous = True
+        
+        return result
     
+
     def process_session(self, session: SuricataSession) -> Dict[str, Any]:
         """Process a finalized session
         

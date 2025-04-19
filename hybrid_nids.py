@@ -37,6 +37,14 @@ from utils.dataset_balancer import DatasetBalancer, integrate_binary_balancing, 
 from telethon import TelegramClient
 # Import custom modules
 from suricata.suricata_parser import SuricataParser
+from suricata.suricata_flows import (
+    SuricataFlow,
+    SuricataHTTP,
+    SuricataDNS,
+    SuricataTLS,
+    SuricataFile,
+    SuricataSSH,
+)
 from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor 
 from utils.anomaly_detector import AnomalyDetector
 from utils.telegram_alert import TelegramAlerter
@@ -517,6 +525,358 @@ class HybridNIDS:
             json.dump(baseline, f, indent=4)
         
         logger.info("Models and related files saved successfully.")
+        
+    def _analyze_event_immediately(self, event):
+        """
+        Perform immediate analysis on events without waiting for session finalization.
+        This handles all types of events, not just SSH.
+        """
+        # Skip if the event is missing key information
+        if not hasattr(event, 'saddr') or not hasattr(event, 'daddr'):
+            return
+        
+        # Initialize tracking structures if they don't exist
+        if not hasattr(self, '_event_tracking'):
+            self._event_tracking = {
+                'ip_activity': {},          # Track activity per IP
+                'port_activity': {},        # Track activity per port
+                'ip_port_pairs': {},        # Track unique IP:port combinations
+                'proto_counters': {},       # Track protocol-specific events
+                'last_alert_time': {},      # Track last alert time per source
+                'last_cleanup': time.time() # Track last cleanup time
+            }
+        
+        # Get basic event information
+        src_ip = event.saddr
+        dst_ip = event.daddr
+        dst_port = getattr(event, 'dport', '0')
+        try:
+            dst_port = int(dst_port)
+        except (ValueError, TypeError):
+            dst_port = 0
+        proto = getattr(event, 'proto', '')
+        app_proto = getattr(event, 'appproto', '')
+        event_type = getattr(event, 'type_', '')
+        
+        # Update IP activity tracking
+        if src_ip not in self._event_tracking['ip_activity']:
+            self._event_tracking['ip_activity'][src_ip] = {
+                'first_seen': time.time(),
+                'last_seen': time.time(),
+                'event_count': 0,
+                'unique_dests': set(),
+                'unique_ports': set()
+            }
+        
+        # Update IP stats
+        ip_stats = self._event_tracking['ip_activity'][src_ip]
+        ip_stats['event_count'] += 1
+        ip_stats['last_seen'] = time.time()
+        ip_stats['unique_dests'].add(dst_ip)
+        ip_stats['unique_ports'].add(dst_port)
+        
+        # Track port activity
+        port_key = f"{dst_port}/{proto}"
+        if port_key not in self._event_tracking['port_activity']:
+            self._event_tracking['port_activity'][port_key] = {
+                'count': 0,
+                'sources': set(),
+                'first_seen': time.time(),
+                'last_seen': time.time()
+            }
+        
+        # Update port stats
+        port_stats = self._event_tracking['port_activity'][port_key]
+        port_stats['count'] += 1
+        port_stats['sources'].add(src_ip)
+        port_stats['last_seen'] = time.time()
+        
+        # Track IP:port pairs
+        pair_key = f"{src_ip}:{dst_ip}:{dst_port}"
+        if pair_key not in self._event_tracking['ip_port_pairs']:
+            self._event_tracking['ip_port_pairs'][pair_key] = {
+                'count': 0,
+                'first_seen': time.time(),
+                'last_seen': time.time(),
+                'bytes_sent': 0,
+                'packets_sent': 0
+            }
+        
+        # Update pair stats
+        pair_stats = self._event_tracking['ip_port_pairs'][pair_key]
+        pair_stats['count'] += 1
+        pair_stats['last_seen'] = time.time()
+        
+        # Track bytes and packets if available
+        if hasattr(event, 'sbytes'):
+            pair_stats['bytes_sent'] += getattr(event, 'sbytes', 0)
+        if hasattr(event, 'spkts'):
+            pair_stats['packets_sent'] += getattr(event, 'spkts', 0)
+        
+        # Track protocol-specific events
+        proto_key = app_proto or proto
+        if proto_key not in self._event_tracking['proto_counters']:
+            self._event_tracking['proto_counters'][proto_key] = 0
+        self._event_tracking['proto_counters'][proto_key] += 1
+        
+        # DETECTION LOGIC: Look for suspicious patterns across all protocols
+        
+        # 1. High-frequency connection attempts to the same port
+        if pair_stats['count'] > 10 and (pair_stats['last_seen'] - pair_stats['first_seen']) < 30:
+            # More than 10 attempts in 30 seconds to same IP:port
+            self._alert_on_suspicious_activity(
+                src_ip, dst_ip, dst_port, proto, app_proto, 
+                'high_frequency_connections', 
+                pair_stats['count'], 
+                pair_stats['last_seen'] - pair_stats['first_seen']
+            )
+        
+        # 2. Port scanning detection (many ports, short timeframe)
+        time_window = 60  # 1 minute window
+        if (ip_stats['last_seen'] - ip_stats['first_seen']) <= time_window:
+            ports_per_minute = len(ip_stats['unique_ports']) / (max(1, (ip_stats['last_seen'] - ip_stats['first_seen']))) * 60
+            if len(ip_stats['unique_ports']) > 15 and ports_per_minute > 30:
+                # More than 15 unique ports at rate of 30+ per minute
+                self._alert_on_suspicious_activity(
+                    src_ip, dst_ip, dst_port, proto, app_proto,
+                    'port_scan',
+                    len(ip_stats['unique_ports']),
+                    ip_stats['last_seen'] - ip_stats['first_seen']
+                )
+        
+        # 3. Host scanning (many IPs, short timeframe)
+        if (ip_stats['last_seen'] - ip_stats['first_seen']) <= time_window:
+            hosts_per_minute = len(ip_stats['unique_dests']) / (max(1, (ip_stats['last_seen'] - ip_stats['first_seen']))) * 60
+            if len(ip_stats['unique_dests']) > 10 and hosts_per_minute > 20:
+                # More than 10 unique destinations at rate of 20+ per minute
+                self._alert_on_suspicious_activity(
+                    src_ip, dst_ip, dst_port, proto, app_proto,
+                    'host_scan',
+                    len(ip_stats['unique_dests']),
+                    ip_stats['last_seen'] - ip_stats['first_seen']
+                )
+        
+        # 4. Protocol-specific analysis
+        if app_proto == 'http' and isinstance(event, SuricataHTTP):
+            self._analyze_http_event(event)
+        elif app_proto == 'dns' and isinstance(event, SuricataDNS):
+            self._analyze_dns_event(event)
+        elif app_proto == 'ssh' and isinstance(event, SuricataSSH):
+            self._analyze_ssh_event(event)
+        elif app_proto == 'tls' and isinstance(event, SuricataTLS):
+            self._analyze_tls_event(event)
+        
+        # Cleanup old tracking data periodically
+        current_time = time.time()
+        if current_time - self._event_tracking['last_cleanup'] > 60:
+            self._cleanup_event_tracking()
+            self._event_tracking['last_cleanup'] = current_time
+    
+    def _alert_on_suspicious_activity(self, src_ip, dst_ip, dst_port, proto, app_proto, 
+                                    alert_type, count, time_span):
+        """
+        Generate alerts for suspicious activity with rate limiting.
+        """
+        # Rate limit alerts (one per source IP per alert type per 30 seconds)
+        current_time = time.time()
+        alert_key = f"{src_ip}:{alert_type}"
+        
+        if alert_key in self._event_tracking['last_alert_time']:
+            last_alert = self._event_tracking['last_alert_time'][alert_key]
+            if current_time - last_alert < 30:
+                return  # Don't alert yet, rate limiting
+        
+        # Update last alert time
+        self._event_tracking['last_alert_time'][alert_key] = current_time
+        
+        # Scores based on alert type
+        score_map = {
+            'high_frequency_connections': 0.80,
+            'port_scan': 0.85,
+            'host_scan': 0.85,
+            'http_attack': 0.70,
+            'dns_attack': 0.75,
+            'ssh_brute_force': 0.90,
+            'tls_attack': 0.70
+        }
+        
+        # Get appropriate score
+        score = score_map.get(alert_type, 0.75)
+        
+        # Prepare alert data with different details based on alert type
+        alert_data = {
+            'flow_id': f"immediate-{src_ip}-{dst_ip}-{current_time}",
+            'timestamp': current_time,
+            'src_ip': src_ip,
+            'src_port': '',  # We may not have this info
+            'dst_ip': dst_ip,
+            'dst_port': dst_port,
+            'proto': proto,
+            'app_proto': app_proto,
+            'duration': time_span,
+            'total_bytes': 0,  # We don't have this info in early detection
+            'total_packets': 0,
+            'ml_result': {'is_anomalous': True, 'score': score},
+            'stat_result': {
+                'is_anomalous': True,
+                'score': score,
+                'details': [{
+                    'feature': alert_type,
+                    'value': count,
+                    'z_score': 5.0,  # Placeholder high score
+                    'is_outlier': True
+                }]
+            },
+            'combined_score': score,
+            'is_anomalous': True,
+            'early_detection': True,
+            'alert_type': alert_type,
+            'event_count': count,
+            'rate': count / max(time_span, 1)
+        }
+        
+        # Log the alert
+        logger.warning(f"EARLY DETECTION: {alert_type.replace('_', ' ').title()} detected from {src_ip} " +
+                    f"to {dst_ip}:{dst_port} ({count} events in {time_span:.1f}s)")
+        
+        # Call the alert handler
+        self.handle_alert(alert_data)    
+    
+    
+    def _analyze_http_event(self, event):
+        """Immediate analysis of HTTP events for suspicious patterns."""
+        if not hasattr(event, 'status_code') or not hasattr(event, 'method'):
+            return
+        
+        src_ip = event.saddr
+        dst_ip = event.daddr
+        uri = getattr(event, 'uri', '')
+        method = getattr(event, 'method', '')
+        status = getattr(event, 'status_code', '')
+        user_agent = getattr(event, 'user_agent', '')
+        
+        # Initialize HTTP tracking if needed
+        if not hasattr(self, '_http_tracking'):
+            self._http_tracking = {
+                'ip_requests': {},
+                'error_tracking': {},
+                'injection_patterns': [
+                    'union select', 'or 1=1', 'exec(', 'eval(', '../', '%27', 
+                    '<script>', 'onload=', 'onerror=', 'document.cookie'
+                ]
+            }
+        
+        # Track requests per IP
+        if src_ip not in self._http_tracking['ip_requests']:
+            self._http_tracking['ip_requests'][src_ip] = {
+                'count': 0,
+                'first_seen': time.time(),
+                'last_seen': time.time(),
+                'status_counts': {},
+                'scan_paths': set()
+            }
+        
+        ip_stats = self._http_tracking['ip_requests'][src_ip]
+        ip_stats['count'] += 1
+        ip_stats['last_seen'] = time.time()
+        ip_stats['status_counts'][status] = ip_stats['status_counts'].get(status, 0) + 1
+        
+        if uri:
+            ip_stats['scan_paths'].add(uri)
+        
+        # Look for injection patterns in URI
+        if uri:
+            for pattern in self._http_tracking['injection_patterns']:
+                if pattern.lower() in uri.lower():
+                    # Possible injection attack
+                    self._alert_on_suspicious_activity(
+                        src_ip, dst_ip, getattr(event, 'dport', '80'), 'TCP', 'http',
+                        'http_attack',
+                        ip_stats['count'],
+                        ip_stats['last_seen'] - ip_stats['first_seen']
+                    )
+                    break
+        
+        # Look for high rate of errors (40x, 50x)
+        if status.startswith('4') or status.startswith('5'):
+            error_count = sum(ip_stats['status_counts'].get(s, 0) for s in ip_stats['status_counts'] 
+                            if s.startswith('4') or s.startswith('5'))
+            
+            if error_count > 10 and (ip_stats['last_seen'] - ip_stats['first_seen']) < 60:
+                # High rate of HTTP errors - possible brute force or scanning
+                self._alert_on_suspicious_activity(
+                    src_ip, dst_ip, getattr(event, 'dport', '80'), 'TCP', 'http',
+                    'http_attack',
+                    error_count,
+                    ip_stats['last_seen'] - ip_stats['first_seen']
+                )
+
+    def _analyze_dns_event(self, event):
+        """Immediate analysis of DNS events for suspicious patterns."""
+        # DNS-specific detection code would go here
+        # ...
+
+    def _analyze_ssh_event(self, event):
+        """Immediate analysis of SSH events for suspicious patterns."""
+        # SSH-specific detection code would go here
+        # ...
+
+    def _analyze_tls_event(self, event):
+        """Immediate analysis of TLS events for suspicious patterns."""
+        # TLS-specific detection code would go here
+        # ...
+    
+    def _cleanup_event_tracking(self):
+        """Clean up old event tracking data."""
+        current_time = time.time()
+        timeout = 600  # 10 minutes
+        
+        # Clean IP activity tracking
+        ip_to_remove = []
+        for ip, stats in self._event_tracking['ip_activity'].items():
+            if current_time - stats['last_seen'] > timeout:
+                ip_to_remove.append(ip)
+        
+        for ip in ip_to_remove:
+            del self._event_tracking['ip_activity'][ip]
+        
+        # Clean port activity tracking
+        port_to_remove = []
+        for port_key, stats in self._event_tracking['port_activity'].items():
+            if current_time - stats['last_seen'] > timeout:
+                port_to_remove.append(port_key)
+        
+        for port_key in port_to_remove:
+            del self._event_tracking['port_activity'][port_key]
+        
+        # Clean IP:port pair tracking
+        pair_to_remove = []
+        for pair_key, stats in self._event_tracking['ip_port_pairs'].items():
+            if current_time - stats['last_seen'] > timeout:
+                pair_to_remove.append(pair_key)
+        
+        for pair_key in pair_to_remove:
+            del self._event_tracking['ip_port_pairs'][pair_key]
+        
+        # Clean last alert time tracking (after 30 minutes)
+        alert_to_remove = []
+        for alert_key, last_time in self._event_tracking['last_alert_time'].items():
+            if current_time - last_time > 1800:  # 30 minutes
+                alert_to_remove.append(alert_key)
+        
+        for alert_key in alert_to_remove:
+            del self._event_tracking['last_alert_time'][alert_key]
+        
+        # Clean protocol tracking if it exists
+        if hasattr(self, '_http_tracking'):
+            http_ip_to_remove = []
+            for ip, stats in self._http_tracking['ip_requests'].items():
+                if current_time - stats['last_seen'] > timeout:
+                    http_ip_to_remove.append(ip)
+            
+            for ip in http_ip_to_remove:
+                del self._http_tracking['ip_requests'][ip]
+    
     
     def process_suricata_event(self, event):
         """
@@ -551,9 +911,24 @@ class HybridNIDS:
         except Exception as e:
             logger.debug(f"Error in whitelist check: {e}")
             
-            
-        # Process event through session manager
+        
+        # IMMEDIATE ANALYSIS PATH: Process event directly for quick detection
+        self._analyze_event_immediately(event)
+        
+        # SESSION-BASED PATH: Continue with regular session management
         finalized_session = self.session_manager.process_event(event)
+        
+        
+        # ACTIVE SESSION MONITORING: Regularly check active sessions
+        current_time = time.time()
+        if not hasattr(self, '_last_active_session_check'):
+            self._last_active_session_check = current_time
+        
+        # Check active sessions every 5 seconds (reduced from 10 to 5)
+        if current_time - self._last_active_session_check > 5:
+            self._process_active_sessions()
+            self._last_active_session_check = current_time
+        
         
         # If session was finalized, process it
         if finalized_session:

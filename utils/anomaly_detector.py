@@ -271,7 +271,7 @@ class AnomalyDetector:
                         is_outlier = False
                     
                     # Use a higher z-score threshold (4.0 instead of 3.0) to reduce false positives
-                    z_threshold = 4.0
+                    z_threshold = 4.0 if is_active_session else 3.5
                     
                     # Add to anomaly score with more conservative threshold
                     if abs(z_score) > z_threshold or is_outlier:
@@ -328,12 +328,13 @@ class AnomalyDetector:
             print(traceback.format_exc())
             return {'is_anomalous': False, 'score': 0, 'details': []}
     
-    def detect_anomalies(self, features: pd.DataFrame) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
+    def detect_anomalies(self, features: pd.DataFrame, is_active_session: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
         """
         Perform both ML and statistical anomaly detection
         
         Args:
             features: DataFrame containing flow features
+            is_active_session: Whether this is an active session (not finalized)
             
         Returns:
             Tuple of (ml_result, stat_result, combined_score)
@@ -342,9 +343,21 @@ class AnomalyDetector:
         ml_result = self.detect_ml_anomaly(features)
         
         # Detect using statistical methods
-        stat_result = self.detect_statistical_anomaly(features)
+        stat_result = self.detect_statistical_anomaly(features, is_active_session)
         
-        # Combine scores from both methods
-        combined_score = max(ml_result.get('score', 0), stat_result.get('score', 0))
+        # For active sessions, we need more evidence before alerting
+        if is_active_session:
+            # Adjust ML score for active sessions (increase confidence threshold)
+            if ml_result.get('score', 0) < 0.65:  # Require higher confidence
+                ml_result['score'] = ml_result.get('score', 0) * 0.8  # Reduce score
+            
+            # Combine scores with ML having less weight for active sessions
+            combined_score = max(
+                ml_result.get('score', 0) * 0.7,  # Reduced weight for ML
+                stat_result.get('score', 0) * 0.9  # Higher weight for statistical
+            )
+        else:
+            # Combine scores normally for finalized sessions
+            combined_score = max(ml_result.get('score', 0), stat_result.get('score', 0))
         
         return ml_result, stat_result, combined_score
