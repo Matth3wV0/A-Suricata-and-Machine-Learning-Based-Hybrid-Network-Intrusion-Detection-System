@@ -271,7 +271,7 @@ class AnomalyDetector:
                         is_outlier = False
                     
                     # Use a higher z-score threshold (4.0 instead of 3.0) to reduce false positives
-                    z_threshold = 4.0 if is_active_session else 3.5
+                    z_threshold = 4.0
                     
                     # Add to anomaly score with more conservative threshold
                     if abs(z_score) > z_threshold or is_outlier:
