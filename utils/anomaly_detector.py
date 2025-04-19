@@ -187,7 +187,7 @@ class AnomalyDetector:
         # You can re-enable it later once the base system works
         return 0.0
     
-    def detect_statistical_anomaly(self, features: pd.DataFrame) -> Dict[str, Any]:
+    def detect_statistical_anomaly(self, features: pd.DataFrame, is_active_session) -> Dict[str, Any]:
         """
         Detect anomalies using statistical methods
         
@@ -271,7 +271,7 @@ class AnomalyDetector:
                         is_outlier = False
                     
                     # Use a higher z-score threshold (4.0 instead of 3.0) to reduce false positives
-                    z_threshold = 4.0
+                    z_threshold = 4.0 if is_active_session else 3.5
                     
                     # Add to anomaly score with more conservative threshold
                     if abs(z_score) > z_threshold or is_outlier:
