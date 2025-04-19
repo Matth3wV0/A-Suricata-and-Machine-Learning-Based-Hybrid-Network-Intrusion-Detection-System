@@ -37,15 +37,6 @@ from utils.dataset_balancer import DatasetBalancer, integrate_binary_balancing, 
 from telethon import TelegramClient
 # Import custom modules
 from suricata.suricata_parser import SuricataParser
-from suricata.suricata_flows import (
-    SuricataFlow,
-    SuricataHTTP,
-    SuricataDNS,
-    SuricataTLS,
-    SuricataFile,
-    SuricataSSH,
-)
-from utils.protocol_analyzers import ProtocolAnalyzer
 from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor 
 from utils.anomaly_detector import AnomalyDetector
 from utils.telegram_alert import TelegramAlerter
@@ -82,6 +73,360 @@ ALIGNED_FEATURES = [
     "down_up_ratio"       # Down/Up Ratio
 ]
 
+class ProactiveBehavioralAnalyzer(BehavioralAnalyzer):
+    """
+    Enhanced BehavioralAnalyzer with proactive detection capabilities
+    """
+    
+    def __init__(self, window_size=300, cleanup_interval=60, max_tracked_ips=10000,
+                 alert_callback=None):
+        super().__init__(window_size, cleanup_interval, max_tracked_ips)
+        self.alert_callback = alert_callback
+        
+        # Add tracking for SSH-specific events
+        self.ssh_connections = {}  # Track SSH connections by IP
+        self.last_check_time = time.time()
+        self.check_interval = 5  # Check every 5 seconds
+        
+        # Add counters for immediate detection
+        self.connection_attempts = {}
+        self.auth_failures = {}
+        
+        # Track alerts to avoid duplicates
+        self.recent_alerts = set()
+    
+    def process_event(self, event, session=None):
+        """
+        Process individual events without waiting for session finalization
+        
+        Args:
+            event: Suricata event object
+            session: Current session state (optional)
+            
+        Returns:
+            Dictionary with alert data if attack detected, None otherwise
+        """
+        if not event:
+            return None
+            
+        # Skip processing for certain event types
+        if not hasattr(event, 'saddr') or not hasattr(event, 'daddr'):
+            return None
+            
+        current_time = time.time()
+        src_ip = event.saddr
+        dst_ip = event.daddr
+        
+        # Get protocol and port info
+        try:
+            dst_port = int(event.dport) if hasattr(event, 'dport') and event.dport else 0
+            proto = event.proto if hasattr(event, 'proto') else ""
+        except (ValueError, TypeError):
+            dst_port = 0
+            proto = ""
+            
+        # Check for SSH-specific events
+        is_ssh = False
+        if hasattr(event, 'appproto') and event.appproto == "ssh":
+            is_ssh = True
+        elif dst_port == 22 and proto in ["TCP", "tcp"]:
+            is_ssh = True
+            
+        # Track connection attempts (especially important for SSH)
+        self._track_connection_attempt(src_ip, dst_ip, dst_port, proto, current_time)
+            
+        # SSH-specific processing
+        if is_ssh:
+            result = self._process_ssh_event(event, src_ip, dst_ip, current_time)
+            if result:
+                return result
+                
+        # Process application events that might indicate failures
+        if hasattr(event, 'type_'):
+            if event.type_ == "http" and hasattr(event, 'status_code'):
+                if event.status_code in ['401', '403', '407']:
+                    self._track_auth_failure(src_ip, dst_ip, dst_port, "http", current_time)
+            elif event.type_ == "ssh" and session and hasattr(session, 'state'):
+                if session.state in ['rejected', 'failed']:
+                    self._track_auth_failure(src_ip, dst_ip, dst_port, "ssh", current_time)
+        
+        # If it's time to run a periodic check, do it
+        if current_time - self.last_check_time > self.check_interval:
+            self.last_check_time = current_time
+            return self._check_for_attacks(current_time)
+            
+        return None
+        
+    def _track_connection_attempt(self, src_ip, dst_ip, dst_port, proto, timestamp):
+        """Track connection attempts by source IP"""
+        if src_ip not in self.connection_attempts:
+            self.connection_attempts[src_ip] = []
+            
+        # Add this connection attempt
+        self.connection_attempts[src_ip].append({
+            'dst_ip': dst_ip,
+            'dst_port': dst_port,
+            'proto': proto,
+            'timestamp': timestamp
+        })
+        
+        # Prune old attempts (keep last 5 minutes)
+        cutoff = timestamp - 300
+        self.connection_attempts[src_ip] = [
+            attempt for attempt in self.connection_attempts[src_ip] 
+            if attempt['timestamp'] > cutoff
+        ]
+        
+    def _track_auth_failure(self, src_ip, dst_ip, dst_port, service, timestamp):
+        """Track authentication failures"""
+        if src_ip not in self.auth_failures:
+            self.auth_failures[src_ip] = []
+            
+        # Add this failure
+        self.auth_failures[src_ip].append({
+            'dst_ip': dst_ip,
+            'dst_port': dst_port,
+            'service': service,
+            'timestamp': timestamp
+        })
+        
+        # Prune old failures (keep last 5 minutes)
+        cutoff = timestamp - 300
+        self.auth_failures[src_ip] = [
+            failure for failure in self.auth_failures[src_ip]
+            if failure['timestamp'] > cutoff
+        ]
+    
+    def _process_ssh_event(self, event, src_ip, dst_ip, current_time):
+        """Process SSH-specific events for early detection"""
+        key = f"{src_ip}:{dst_ip}"
+        
+        # Initialize tracking for this connection if needed
+        if key not in self.ssh_connections:
+            self.ssh_connections[key] = {
+                'attempts': 0,
+                'failures': 0,
+                'first_seen': current_time,
+                'last_seen': current_time,
+                'connections': []
+            }
+        
+        # Update tracking
+        self.ssh_connections[key]['last_seen'] = current_time
+        self.ssh_connections[key]['attempts'] += 1
+        
+        # Add to connections list with timestamp
+        self.ssh_connections[key]['connections'].append(current_time)
+        
+        # Prune old connections (older than 5 minutes)
+        cutoff = current_time - 300
+        self.ssh_connections[key]['connections'] = [
+            t for t in self.ssh_connections[key]['connections'] if t > cutoff
+        ]
+        
+        # Calculate connection rate (per minute)
+        conn_count = len(self.ssh_connections[key]['connections'])
+        time_span = current_time - max(cutoff, self.ssh_connections[key]['first_seen'])
+        if time_span < 1:
+            time_span = 1  # Avoid division by zero
+            
+        conn_rate = (conn_count / time_span) * 60
+        
+        # Check for brute force pattern - high connection rate to SSH port
+        if conn_rate > 20:  # More than 20 connections per minute
+            # Check if we've alerted for this source recently
+            alert_key = f"ssh_brute_force:{src_ip}"
+            if alert_key in self.recent_alerts:
+                return None  # Already alerted
+                
+            # Add to recent alerts
+            self.recent_alerts.add(alert_key)
+            
+            # Generate alert
+            alert_data = {
+                'timestamp': current_time,
+                'src_ip': src_ip,
+                'dst_ip': dst_ip,
+                'dst_port': 22,
+                'proto': 'TCP',
+                'app_proto': 'ssh',
+                'flow_id': event.uid if hasattr(event, 'uid') else '',
+                'total_bytes': 0,
+                'total_packets': 0,
+                'duration': 0,
+                'is_anomalous': True,
+                'combined_score': 0.85,
+                'attack_type': 'SSH Brute Force',
+                'auth_failures': self.ssh_connections[key]['failures'],
+                'connection_rate': conn_rate,
+                'connections_per_minute': conn_rate,
+                'behavioral_features': {
+                    'brute_force_score': 0.85,
+                    'overall_anomaly_score': 0.85,
+                    'auth_failures_per_second': conn_rate / 60
+                },
+                'ml_result': {'is_anomalous': True, 'score': 0.85},
+                'stat_result': {'is_anomalous': True, 'score': 0.85}
+            }
+            
+            return alert_data
+            
+        return None
+    
+    def _check_for_attacks(self, current_time):
+        """Periodically check for attack patterns across all tracked IPs"""
+        # Cleanup expired data first
+        self.cleanup()
+        
+        # Check for brute force patterns in connection attempts
+        for src_ip, attempts in self.connection_attempts.items():
+            # Skip if too few attempts
+            if len(attempts) < 10:
+                continue
+                
+            # Count attempts by destination port in the last minute
+            port_counts = {}
+            cutoff = current_time - 60
+            
+            for attempt in attempts:
+                if attempt['timestamp'] > cutoff:
+                    port = attempt['dst_port']
+                    if port not in port_counts:
+                        port_counts[port] = 0
+                    port_counts[port] += 1
+            
+            # Check for high rate to a specific port
+            for port, count in port_counts.items():
+                if count >= 10:  # More than 10 attempts per minute to same port
+                    # Check if this is likely SSH (port 22)
+                    is_ssh = (port == 22)
+                    
+                    # Check if we've alerted for this source recently
+                    alert_key = f"brute_force:{src_ip}:{port}"
+                    if alert_key in self.recent_alerts:
+                        continue  # Already alerted
+                        
+                    # Add to recent alerts (expires after 30 seconds)
+                    self.recent_alerts.add(alert_key)
+                    
+                    # Generate alert
+                    attack_service = "SSH" if is_ssh else f"Service on port {port}"
+                    
+                    # Get destination info from most recent attempt
+                    recent_attempt = max(attempts, key=lambda x: x['timestamp'])
+                    
+                    alert_data = {
+                        'timestamp': current_time,
+                        'src_ip': src_ip,
+                        'dst_ip': recent_attempt['dst_ip'],
+                        'dst_port': port,
+                        'proto': recent_attempt['proto'],
+                        'app_proto': 'ssh' if is_ssh else '',
+                        'flow_id': '',  # No specific flow ID for this alert
+                        'total_bytes': 0,
+                        'total_packets': count,
+                        'duration': 60,  # Last minute
+                        'is_anomalous': True,
+                        'combined_score': 0.8,
+                        'attack_type': f"{attack_service} Brute Force",
+                        'connections_per_minute': count,
+                        'behavioral_features': {
+                            'brute_force_score': 0.8,
+                            'overall_anomaly_score': 0.8,
+                            'auth_failures_per_second': count / 60,
+                            'conn_rate': count / 60
+                        },
+                        'ml_result': {'is_anomalous': True, 'score': 0.8},
+                        'stat_result': {'is_anomalous': True, 'score': 0.8}
+                    }
+                    
+                    return alert_data
+        
+        # Check auth failures
+        for src_ip, failures in self.auth_failures.items():
+            # Count failures in the last minute
+            cutoff = current_time - 60
+            recent_failures = [f for f in failures if f['timestamp'] > cutoff]
+            
+            # Group by service
+            service_failures = {}
+            for failure in recent_failures:
+                service = failure['service']
+                if service not in service_failures:
+                    service_failures[service] = []
+                service_failures[service].append(failure)
+            
+            # Check for high failure rate by service
+            for service, service_list in service_failures.items():
+                if len(service_list) >= 3:  # 3+ failures per minute to same service
+                    # Check if we've alerted for this source recently
+                    alert_key = f"auth_failure:{src_ip}:{service}"
+                    if alert_key in self.recent_alerts:
+                        continue  # Already alerted
+                        
+                    # Add to recent alerts
+                    self.recent_alerts.add(alert_key)
+                    
+                    # Get destination info from most recent failure
+                    recent_failure = max(service_list, key=lambda x: x['timestamp'])
+                    
+                    # Generate alert
+                    alert_data = {
+                        'timestamp': current_time,
+                        'src_ip': src_ip,
+                        'dst_ip': recent_failure['dst_ip'],
+                        'dst_port': recent_failure['dst_port'],
+                        'proto': 'TCP',  # Assume TCP for auth services
+                        'app_proto': service,
+                        'flow_id': '',  # No specific flow ID for this alert
+                        'total_bytes': 0,
+                        'total_packets': len(service_list),
+                        'duration': 60,  # Last minute
+                        'is_anomalous': True,
+                        'combined_score': 0.85,
+                        'attack_type': f"{service.upper()} Authentication Brute Force",
+                        'auth_failures': len(service_list),
+                        'behavioral_features': {
+                            'brute_force_score': 0.85,
+                            'overall_anomaly_score': 0.85,
+                            'auth_failures_per_second': len(service_list) / 60
+                        },
+                        'ml_result': {'is_anomalous': True, 'score': 0.85},
+                        'stat_result': {'is_anomalous': True, 'score': 0.85}
+                    }
+                    
+                    return alert_data
+        
+        # No alerts triggered
+        return None
+        
+    def cleanup(self):
+        """Clean up expired data"""
+        # Call parent cleanup
+        super().cleanup()
+        
+        # Clean up SSH connections tracker
+        current_time = time.time()
+        cutoff = current_time - self.window_size
+        
+        keys_to_remove = []
+        for key, data in self.ssh_connections.items():
+            if data['last_seen'] < cutoff:
+                keys_to_remove.append(key)
+                
+        for key in keys_to_remove:
+            del self.ssh_connections[key]
+            
+        # Clean up recent alerts (expire after 30 seconds)
+        alert_cutoff = current_time - 30
+        self.recent_alerts = {
+            alert for alert in self.recent_alerts
+            if not alert.startswith("_time:") or float(alert.split(":", 1)[1]) > alert_cutoff
+        }
+        
+        # Add timestamp marker for this cleanup
+        self.recent_alerts.add(f"_time:{current_time}")
+
 class HybridNIDS:
     """
     Enhanced Hybrid Network Intrusion Detection System with session and behavioral awareness
@@ -108,19 +453,19 @@ class HybridNIDS:
         self.parser = SuricataParser()
         self.feature_extractor = AdaptiveFlowFeatureExtractor(ALIGNED_FEATURES)
         self.service_whitelist = ServiceWhitelist()
-        self.protocol_analyzer = ProtocolAnalyzer(alert_callback=self.handle_alert)
+        
         # Get current directory for session file
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
         
         # Initialize new components
         self.session_manager = SessionManager(
-            session_timeout=15,  # 2 minutes timeout for sessions
+            session_timeout=120,  # 2 minutes timeout for sessions
             max_sessions=50000    # Maximum sessions to keep in memory
         )
         
         self.behavioral_analyzer = BehavioralAnalyzer(
-            window_size=120,       # 5 minutes window for behavioral analysis
-            cleanup_interval=10,   # Cleanup every minute
+            window_size=300,       # 5 minutes window for behavioral analysis
+            cleanup_interval=60,   # Cleanup every minute
             max_tracked_ips=10000  # Maximum IPs to track
         )
         
@@ -526,171 +871,6 @@ class HybridNIDS:
             json.dump(baseline, f, indent=4)
         
         logger.info("Models and related files saved successfully.")
-        
-    def _analyze_event_immediately(self, event):
-        """
-        Perform immediate analysis on events without waiting for session finalization.
-        Delegates to protocol-specific analyzers.
-        """
-        # Skip if this is a finalized flow event (we'll process it fully later)
-        if hasattr(event, 'type_') and event.type_ == 'flow':
-            return
-        
-        # Use the protocol analyzer to process the event
-        self.protocol_analyzer.process_event(event)
-        
-        # Cleanup periodically
-        current_time = time.time()
-        if not hasattr(self, '_last_analyzer_cleanup'):
-            self._last_analyzer_cleanup = current_time
-        
-        if current_time - self._last_analyzer_cleanup > 60:  # Cleanup every minute
-            self.protocol_analyzer.cleanup()
-            self._last_analyzer_cleanup = current_time
-            
-        
-    def _alert_on_suspicious_activity(self, src_ip, dst_ip, dst_port, proto, app_proto, 
-                                    alert_type, count, time_span):
-        """
-        Generate alerts for suspicious activity with rate limiting.
-        """
-        # Rate limit alerts (one per source IP per alert type per 30 seconds)
-        current_time = time.time()
-        alert_key = f"{src_ip}:{alert_type}"
-        
-        if alert_key in self._event_tracking['last_alert_time']:
-            last_alert = self._event_tracking['last_alert_time'][alert_key]
-            if current_time - last_alert < 30:
-                return  # Don't alert yet, rate limiting
-        
-        # Update last alert time
-        self._event_tracking['last_alert_time'][alert_key] = current_time
-        
-        # Scores based on alert type
-        score_map = {
-            'high_frequency_connections': 0.80,
-            'port_scan': 0.85,
-            'host_scan': 0.85,
-            'http_attack': 0.70,
-            'dns_attack': 0.75,
-            'ssh_brute_force': 0.90,
-            'tls_attack': 0.70
-        }
-        
-        # Get appropriate score
-        score = score_map.get(alert_type, 0.75)
-        
-        # Prepare alert data with different details based on alert type
-        alert_data = {
-            'flow_id': f"immediate-{src_ip}-{dst_ip}-{current_time}",
-            'timestamp': current_time,
-            'src_ip': src_ip,
-            'src_port': '',  # We may not have this info
-            'dst_ip': dst_ip,
-            'dst_port': dst_port,
-            'proto': proto,
-            'app_proto': app_proto,
-            'duration': time_span,
-            'total_bytes': 0,  # We don't have this info in early detection
-            'total_packets': 0,
-            'ml_result': {'is_anomalous': True, 'score': score},
-            'stat_result': {
-                'is_anomalous': True,
-                'score': score,
-                'details': [{
-                    'feature': alert_type,
-                    'value': count,
-                    'z_score': 5.0,  # Placeholder high score
-                    'is_outlier': True
-                }]
-            },
-            'combined_score': score,
-            'is_anomalous': True,
-            'early_detection': True,
-            'alert_type': alert_type,
-            'event_count': count,
-            'rate': count / max(time_span, 1)
-        }
-        
-        # Log the alert
-        logger.warning(f"EARLY DETECTION: {alert_type.replace('_', ' ').title()} detected from {src_ip} " +
-                    f"to {dst_ip}:{dst_port} ({count} events in {time_span:.1f}s)")
-        
-        # Call the alert handler
-        self.handle_alert(alert_data)    
-    
-    
-    def _cleanup_event_tracking(self):
-        """Clean up old event tracking data."""
-        current_time = time.time()
-        timeout = 600  # 10 minutes
-        
-        # Clean IP activity tracking
-        ip_to_remove = []
-        for ip, stats in self._event_tracking['ip_activity'].items():
-            if current_time - stats['last_seen'] > timeout:
-                ip_to_remove.append(ip)
-        
-        for ip in ip_to_remove:
-            del self._event_tracking['ip_activity'][ip]
-        
-        # Clean port activity tracking
-        port_to_remove = []
-        for port_key, stats in self._event_tracking['port_activity'].items():
-            if current_time - stats['last_seen'] > timeout:
-                port_to_remove.append(port_key)
-        
-        for port_key in port_to_remove:
-            del self._event_tracking['port_activity'][port_key]
-        
-        # Clean IP:port pair tracking
-        pair_to_remove = []
-        for pair_key, stats in self._event_tracking['ip_port_pairs'].items():
-            if current_time - stats['last_seen'] > timeout:
-                pair_to_remove.append(pair_key)
-        
-        for pair_key in pair_to_remove:
-            del self._event_tracking['ip_port_pairs'][pair_key]
-        
-        # Clean last alert time tracking (after 30 minutes)
-        alert_to_remove = []
-        for alert_key, last_time in self._event_tracking['last_alert_time'].items():
-            if current_time - last_time > 1800:  # 30 minutes
-                alert_to_remove.append(alert_key)
-        
-        for alert_key in alert_to_remove:
-            del self._event_tracking['last_alert_time'][alert_key]
-        
-        # Clean protocol tracking if it exists
-        if hasattr(self, '_http_tracking'):
-            http_ip_to_remove = []
-            for ip, stats in self._http_tracking['ip_requests'].items():
-                if current_time - stats['last_seen'] > timeout:
-                    http_ip_to_remove.append(ip)
-            
-            for ip in http_ip_to_remove:
-                del self._http_tracking['ip_requests'][ip]
-    
-    def _process_active_sessions(self):
-        """
-        Process active but not yet finalized sessions to detect attacks earlier.
-        """
-        suspicious_sessions = self.session_manager.get_suspicious_active_sessions()
-        
-        processed_count = 0
-        for session in suspicious_sessions:
-            try:
-                # Process the session as if it was finalized
-                result = self.flow_finalizer.process_active_session(session)
-                if result and result.get('is_anomalous', False):
-                    # We have a suspicious session, generate an alert
-                    self.handle_alert(result)
-                    processed_count += 1
-            except Exception as e:
-                logger.error(f"Error processing active session: {e}")
-        
-        if processed_count > 0:
-            logger.debug(f"Processed {processed_count} suspicious active sessions")
     
     def process_suricata_event(self, event):
         """
@@ -725,24 +905,9 @@ class HybridNIDS:
         except Exception as e:
             logger.debug(f"Error in whitelist check: {e}")
             
-        
-        # IMMEDIATE ANALYSIS PATH: Process event directly for quick detection
-        self._analyze_event_immediately(event)
-        
-        # SESSION-BASED PATH: Continue with regular session management
+            
+        # Process event through session manager
         finalized_session = self.session_manager.process_event(event)
-        
-        
-        # ACTIVE SESSION MONITORING: Regularly check active sessions
-        current_time = time.time()
-        if not hasattr(self, '_last_active_session_check'):
-            self._last_active_session_check = current_time
-        
-        # Check active sessions every 5 seconds (reduced from 10 to 5)
-        if current_time - self._last_active_session_check > 5:
-            self._process_active_sessions()
-            self._last_active_session_check = current_time
-        
         
         # If session was finalized, process it
         if finalized_session:
@@ -1230,7 +1395,7 @@ class HybridNIDS:
                                 
                                 # Process entry using parser
                                 event = self.parser.process_line(entry)
-                                print(event)
+                                
                                 if not event:
                                     continue
                                 
@@ -1255,7 +1420,7 @@ class HybridNIDS:
                 
                 # Check if cleanup is needed
                 current_time = time.time()
-                if current_time - last_cleanup > 10:  # Cleanup every minute
+                if current_time - last_cleanup > 60:  # Cleanup every minute
                     # Clean up expired sessions
                     expired_sessions = self.session_manager.cleanup_expired_sessions()
                     
@@ -1272,7 +1437,7 @@ class HybridNIDS:
                     last_cleanup = current_time
                 
                 # Print status update every minute
-                if current_time - last_stats_update > 30:
+                if current_time - last_stats_update > 60:
                     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     logger.info(f"[{now}] Processed: {processed_events} | Sessions: {finalized_sessions} | Alerts: {anomalies_detected}")
                     
@@ -1287,7 +1452,7 @@ class HybridNIDS:
                     last_stats_update = current_time
                 
                 # Sleep for a second
-                time.sleep(0.5)
+                time.sleep(1)
         
         except KeyboardInterrupt:
             # Print summary when stopped
@@ -1302,9 +1467,227 @@ class HybridNIDS:
             logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
 
 
+class EnhancedHybridNIDS(HybridNIDS):
+    """Enhanced Hybrid NIDS with proactive detection capabilities"""
+    
+    def __init__(self, model_dir='./model', telegram_enabled=False):
+        """Initialize the Enhanced Hybrid NIDS."""
+        # Call parent init
+        super().__init__(model_dir, telegram_enabled)
+        
+        # Replace the behavioral analyzer with our enhanced version
+        self.behavioral_analyzer = ProactiveBehavioralAnalyzer(
+            window_size=300,       # 5 minutes window for behavioral analysis
+            cleanup_interval=60,   # Cleanup every minute
+            max_tracked_ips=10000, # Maximum IPs to track
+            alert_callback=self.handle_alert
+        )
+    
+    def process_suricata_event(self, event):
+        """
+        Process a Suricata event with proactive detection
+        
+        Args:
+            event: Parsed Suricata event object
+            
+        Returns:
+            Finalized session if the event caused a session to be finalized, None otherwise
+        """
+        if not event:
+            return None
+            
+        # Whitelist check for events (same as original)
+        try:
+            if hasattr(event, 'saddr') and event.saddr in self.service_whitelist.pfsense_interfaces:
+                return None
+                
+            if hasattr(event, 'daddr') and hasattr(event, 'dport') and hasattr(event, 'proto'):
+                try:
+                    dport = int(event.dport) if event.dport else 0
+                except (ValueError, TypeError):
+                    dport = 0
+                    
+                if dport > 0 and self.service_whitelist.is_whitelisted(event.daddr, dport, event.proto):
+                    logger.debug(f"Skipping whitelisted service: {event.daddr}:{dport} ({event.proto})")
+                    return None
+        except Exception as e:
+            logger.debug(f"Error in whitelist check: {e}")
+        
+        # Get current session if it exists
+        current_session = None
+        if hasattr(event, 'uid'):
+            current_session = self.session_manager.get_session(event.uid)
+            
+        # NEW: Process event through behavioral analyzer BEFORE session finalization
+        # This enables early detection of patterns like brute force
+        behavioral_alert = self.behavioral_analyzer.process_event(event, current_session)
+        
+        # If behavioral analysis detected an attack, generate alert immediately
+        if behavioral_alert:
+            logger.warning(f"Early behavioral detection: {behavioral_alert.get('attack_type', 'Unknown attack')} from {behavioral_alert.get('src_ip')}")
+            self.handle_alert(behavioral_alert)
+            
+        # Process event through session manager (same as original)
+        finalized_session = self.session_manager.process_event(event)
+        
+        # If session was finalized, still process it as before
+        if finalized_session:
+            # Run finalizer on the session
+            result = self.flow_finalizer.process_session(finalized_session)
+            
+            # Process through behavioral analyzer
+            behavioral_features = self.behavioral_analyzer.process_session(finalized_session)
+            
+            # If behavioral analysis detects anomalies, add to result
+            if behavioral_features:
+                result['behavioral_features'] = behavioral_features
+                
+                # Increase anomaly score based on behavioral analysis
+                if result['combined_score'] < 0.8 and behavioral_features.get('overall_anomaly_score', 0) > 0.7:
+                    result['combined_score'] = 0.8
+                    result['is_anomalous'] = True
+                    
+                    # Log the behavioral alert
+                    logger.warning(f"Behavioral anomaly detected for IP {finalized_session.saddr}")
+                    
+                    # Generate additional alert if not already done
+                    if not result.get('is_anomalous'):
+                        self.handle_alert(result)
+            
+            return result
+        
+        return None
+    
+    def monitor_suricata_file(self, file_path, output_file=None):
+        """Monitor a Suricata JSON log file in real-time with enhanced detection"""
+        logger.info(f"Monitoring Suricata JSON log file: {file_path}")
+        self.output_file = output_file
+        
+        # Get initial file position
+        with open(file_path, 'r') as f:
+            f.seek(0, 2)  # Move to end of file
+            position = f.tell()
+        
+        # Initialize counters
+        total_entries = 0
+        flagged_by_suricata = 0
+        processed_events = 0
+        finalized_sessions = 0
+        anomalies_detected = 0
+        last_cleanup = time.time()
+        last_stats_update = time.time()
+        last_check_time = time.time()
+        
+        try:
+            while True:
+                # Check if file has grown
+                with open(file_path, 'r') as f:
+                    f.seek(0, 2)
+                    end_position = f.tell()
+                    
+                    if end_position > position:
+                        # Process new data
+                        f.seek(position)
+                        for line in f:
+                            total_entries += 1
+                            
+                            try:
+                                # Parse JSON
+                                entry = json.loads(line)
+                                
+                                # Check if already flagged by Suricata
+                                if 'alert' in entry:
+                                    flagged_by_suricata += 1
+                                    continue
+                                
+                                # Process entry using parser
+                                event = self.parser.process_line(entry)
+                                
+                                if not event:
+                                    continue
+                                
+                                processed_events += 1
+                                
+                                # Process through session manager
+                                result = self.process_suricata_event(event)
+                                
+                                if result:
+                                    finalized_sessions += 1
+                                    if result.get('is_anomalous', False):
+                                        anomalies_detected += 1
+                            
+                            except json.JSONDecodeError:
+                                continue
+                            except Exception as e:
+                                logger.error(f"Error processing entry: {e}")
+                                continue
+                        
+                        # Update position
+                        position = end_position
+                
+                # Check if cleanup is needed
+                current_time = time.time()
+                if current_time - last_cleanup > 60:  # Cleanup every minute
+                    # Clean up expired sessions
+                    expired_sessions = self.session_manager.cleanup_expired_sessions()
+                    
+                    # Process any expired sessions
+                    for session in expired_sessions:
+                        result = self.flow_finalizer.process_session(session)
+                        finalized_sessions += 1
+                        if result.get('is_anomalous', False):
+                            anomalies_detected += 1
+                    
+                    # Clean up behavioral analyzer
+                    self.behavioral_analyzer.cleanup()
+                    
+                    last_cleanup = current_time
+                
+                # NEW: Perform periodic checks for suspicious behavior
+                if current_time - last_check_time > 10:  # Check every 10 seconds
+                    # Check for suspicious behavioral patterns
+                    alert = self.behavioral_analyzer._check_for_attacks(current_time)
+                    
+                    if alert:
+                        logger.warning(f"Periodic check detected attack: {alert.get('attack_type', 'Unknown')} from {alert.get('src_ip')}")
+                        self.handle_alert(alert)
+                        anomalies_detected += 1
+                        
+                    last_check_time = current_time
+                
+                # Print status update every minute
+                if current_time - last_stats_update > 60:
+                    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    logger.info(f"[{now}] Processed: {processed_events} | Sessions: {finalized_sessions} | Alerts: {anomalies_detected}")
+                    
+                    # Check for suspicious IPs based on behavioral analysis
+                    top_anomalous = self.behavioral_analyzer.get_top_anomalous_ips(5)
+                    if top_anomalous:
+                        logger.info("Top suspicious IPs from behavioral analysis:")
+                        for ip, score in top_anomalous:
+                            if score > 0.7:  # Only show highly suspicious IPs
+                                logger.info(f"  - {ip}: Score {score:.2f}")
+                    
+                    last_stats_update = current_time
+                
+                # Sleep for a shorter time to improve responsiveness
+                time.sleep(0.5)  # Check twice per second instead of once
+        
+        except KeyboardInterrupt:
+            # Print summary when stopped
+            logger.info("\n\nMonitoring stopped.")
+            logger.info(f"Total entries: {total_entries}")
+            logger.info(f"Entries flagged by Suricata: {flagged_by_suricata}")
+            logger.info(f"Processed events: {processed_events}")
+            logger.info(f"Finalized sessions: {finalized_sessions}")
+            logger.info(f"Anomalies detected: {anomalies_detected}")
+            logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
+            logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")
+            logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
+
 def parse_args():
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description='Enhanced Hybrid NIDS with Session and Behavioral Awareness')
+    parser = argparse.ArgumentParser(description='Enhanced Hybrid NIDS with Proactive Detection')
     
     # Action arguments (mutually exclusive)
     action_group = parser.add_mutually_exclusive_group(required=True)
@@ -1332,8 +1715,8 @@ def main():
     """Main function."""
     args = parse_args()
     
-    # Initialize Hybrid NIDS
-    nids = HybridNIDS(model_dir=args.model_dir, telegram_enabled=args.telegram)
+    # Initialize Enhanced Hybrid NIDS
+    nids = EnhancedHybridNIDS(model_dir=args.model_dir, telegram_enabled=args.telegram)
     
     # Execute the selected action
     if args.train:
@@ -1343,8 +1726,6 @@ def main():
     elif args.realtime:
         nids.monitor_suricata_file(args.realtime, args.output)
     
-    # No need to explicitly disconnect the Telegram client
-    # The daemon thread will be terminated when the main program exits
     logger.info("NIDS execution completed")
 
 
