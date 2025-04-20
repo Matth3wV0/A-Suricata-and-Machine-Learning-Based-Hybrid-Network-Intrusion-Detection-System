@@ -769,56 +769,56 @@ class HybridNIDS:
                 message += f"App Protocol: {alert_data.get('app_proto', 'Unknown')}\n"
             
             # Add application layer details if available
-            if session.get('http_event_count', 0) > 0:
-                message += f"HTTP Events: {session.get('http_event_count', 0)}\n"
-                if session.get('http_methods', []):
-                    message += f"HTTP Methods: {', '.join(session.get('http_methods', []))}\n"
-                if session.get('http_status_codes', []):
-                    message += f"HTTP Status Codes: {', '.join(session.get('http_status_codes', []))}\n"
+            if session.http_event_count > 0:
+                message += f"HTTP Events: {session.http_event_count}\n"
+                if session.http_methods:
+                    message += f"HTTP Methods: {', '.join(session.http_methods)}\n"
+                if session.http_status_codes:
+                    message += f"HTTP Status Codes: {', '.join(session.http_status_codes)}\n"
             
-            if session.get('dns_event_count', 0) > 0:
-                message += f"DNS Events: {session.get('dns_event_count', 0)}\n"
-                if session.get('dns_queries', []):
-                    queries = session.get('dns_queries', [])[:3]  # Show only first 3
+            if session.dns_event_count > 0:
+                message += f"DNS Events: {session.dns_event_count}\n"
+                if session.dns_queries:
+                    queries = session.dns_queries[:3]  # Show only first 3
                     message += f"DNS Queries: {', '.join(queries)}\n"
             
-            if session.get('tls_event_count', 0) > 0:
-                message += f"TLS Events: {session.get('tls_event_count', 0)}\n"
-                if session.get('tls_sni', []):
-                    message += f"TLS SNI: {', '.join(session.get('tls_sni', []))}\n"
+            if session.tls_event_count > 0:
+                message += f"TLS Events: {session.tls_event_count}\n"
+                if session.tls_sni:
+                    message += f"TLS SNI: {', '.join(session.tls_sni)}\n"
             
             # Add flow timing information
             if 'starttime' in session:
-                message += f"Flow Start: {session.get('starttime', 'Unknown')}\n"
+                message += f"Flow Start: {session.starttime}\n"
             if 'endtime' in session:
-                message += f"Flow End: {session.get('endtime', 'Unknown')}\n"
+                message += f"Flow End: {session.endtime}\n"
             if 'duration' in alert_data:
-                message += f"Duration: {float(alert_data.get('duration', 0)):.3f} seconds\n"
+                message += f"Duration: {float(alert_data.duration):.3f} seconds\n"
             
             # Traffic volume stats
             message += "-" * 40 + "\n"
             message += "TRAFFIC STATISTICS:\n"
             
             try:
-                total_bytes = alert_data.get('total_bytes', 0)
-                total_packets = alert_data.get('total_packets', 0)
-                fwd_bytes = session.get('total_fwd_bytes', 0)
-                bwd_bytes = session.get('total_bwd_bytes', 0)
-                fwd_packets = session.get('total_fwd_packets', 0)
-                bwd_packets = session.get('total_bwd_packets', 0)
+                total_bytes = alert_data.total_bytes
+                total_packets = alert_data.total_packets
+                fwd_bytes = session.total_fwd_bytes
+                bwd_bytes = session.total_bwd_bytes
+                fwd_packets = session.total_fwd_packets
+                bwd_packets = session.total_bwd_packets
                 
-                message += f"Total Bytes: {total_bytes:,}\n"
-                message += f"  → Source→Dest: {fwd_bytes:,} bytes\n"
-                message += f"  → Dest→Source: {bwd_bytes:,} bytes\n"
-                message += f"Total Packets: {total_packets:,}\n"
-                message += f"  → Source→Dest: {fwd_packets:,} packets\n"
-                message += f"  → Dest→Source: {bwd_packets:,} packets\n"
+                message += f"Total Bytes: {total_bytes}\n"
+                message += f"  → Source→Dest: {fwd_bytes} bytes\n"
+                message += f"  → Dest→Source: {bwd_bytes} bytes\n"
+                message += f"Total Packets: {total_packets}\n"
+                message += f"  → Source→Dest: {fwd_packets} packets\n"
+                message += f"  → Dest→Source: {bwd_packets} packets\n"
             except Exception as e:
                 message += f"Error processing traffic statistics: {str(e)}\n"
             
             # Connection state
             if 'state' in session:
-                message += f"Connection State: {session.get('state', '')}\n"
+                message += f"Connection State: {session.state}\n"
             
             # Anomaly detection results
             message += "-" * 40 + "\n"
@@ -999,18 +999,18 @@ class HybridNIDS:
         
         # Session information
         session = alert_data.get('session', {})
-        # print(alert_data)
-        # print(session)
+        print(alert_data)
+        print(session)
         logger.info(f"Flow ID: {session.flow_id}")
         logger.info(f"Duration: {alert_data.get('duration', 0):.3f} seconds")
         
         # App layer info
-        if session.get('http_event_count', 0) > 0:
-            logger.info(f"HTTP: {session.get('http_event_count', 0)} events")
-        if session.get('dns_event_count', 0) > 0:
-            logger.info(f"DNS: {session.get('dns_event_count', 0)} events")
-        if session.get('tls_event_count', 0) > 0:
-            logger.info(f"TLS: {session.get('tls_event_count', 0)} events")
+        if session.http_event_count > 0:
+            logger.info(f"HTTP: {session.http_event_count} events")
+        if session.dns_event_count > 0:
+            logger.info(f"DNS: {session.dns_event_count} events")
+        if session.tls_event_count > 0:
+            logger.info(f"TLS: {session.tls_event_count} events")
         
         # Traffic volume
         logger.info(f"Bytes: {alert_data.get('total_bytes', 0):,}, Packets: {alert_data.get('total_packets', 0):,}")
