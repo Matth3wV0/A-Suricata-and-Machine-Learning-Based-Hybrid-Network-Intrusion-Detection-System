@@ -19,15 +19,15 @@ class AnalysisTrigger:
     """Configuration for when to trigger incremental analysis"""
     
     # Time-based trigger (in seconds)
-    time_interval: float = 10.0  # Analyze active flows every 10 seconds
+    time_interval: float = 5.0  # Reduced from 10.0 - analyze every 5 seconds
     
     # Packet-based triggers
-    packet_threshold: int = 10    # Analyze after 10 packets in a flow
-    packet_increment: int = 20    # Subsequent analysis every 20 more packets
+    packet_threshold: int = 5    # Reduced from 10 - analyze after 5 packets
+    packet_increment: int = 10   # Subsequent analysis every 10 more packets
     
     # Byte-based triggers
-    byte_threshold: int = 5000    # Analyze after 5KB in a flow
-    byte_increment: int = 10000   # Subsequent analysis every 10KB more
+    byte_threshold: int = 1000   # Reduced from 5000 - analyze after 1KB
+    byte_increment: int = 5000   # Subsequent analysis every 5KB more
     
     # Trigger types to use (can combine)
     use_time_trigger: bool = True
@@ -50,7 +50,22 @@ class AnalysisTrigger:
     critical_protocols: Set[str] = field(default_factory=lambda: {
         'ssh', 'rdp', 'ftp', 'smb', 'telnet'
     })
-
+    
+    # Per-port threshold configurations (overrides default thresholds for specific ports)
+    # Format: {port: (packet_threshold, byte_threshold, time_interval)}
+    port_thresholds: Dict[int, Tuple[int, int, float]] = field(default_factory=lambda: {
+        22: (1, 100, 1.0),     # SSH - extremely aggressive thresholds
+        23: (1, 100, 1.0),     # Telnet - extremely aggressive thresholds
+        21: (2, 200, 1.0),     # FTP - very aggressive thresholds  
+        3389: (2, 200, 1.0),   # RDP - very aggressive thresholds
+        445: (2, 300, 2.0),    # SMB - aggressive thresholds
+        139: (2, 300, 2.0),    # NetBIOS - aggressive thresholds
+        1433: (2, 300, 2.0),   # MSSQL - aggressive thresholds
+        3306: (2, 300, 2.0),   # MySQL - aggressive thresholds
+        53: (3, 300, 2.0),     # DNS - aggressive thresholds
+        80: (3, 500, 3.0),     # HTTP - moderately aggressive thresholds
+        443: (3, 500, 3.0),    # HTTPS - moderately aggressive thresholds
+    })
 
 class IncrementalAnalyzer:
     """
@@ -112,47 +127,92 @@ class IncrementalAnalyzer:
         if flow_id in self.alerted_flows:
             return False
         
-        # Always analyze critical ports and protocols
-        if hasattr(session, 'dport') and int(session.dport) in self.config.critical_ports:
-            return True
+        # Check for critical ports - prioritize these for immediate analysis
+        is_critical_port = False
+        port_specific_thresholds = None
         
-        if hasattr(session, 'appproto') and session.appproto.lower() in self.config.critical_protocols:
-            return True
+        if hasattr(session, 'dport') and session.dport:
+            try:
+                port = int(session.dport)
+                is_critical_port = port in self.config.critical_ports
+                
+                # Get port-specific thresholds if available
+                if port in self.config.port_thresholds:
+                    port_specific_thresholds = self.config.port_thresholds[port]
+                    
+                # First packet analysis for critical ports
+                if is_critical_port and flow_id not in self.last_analysis_time:
+                    logger.debug(f"Immediate analysis triggered for critical port {port} (first check)")
+                    return True
+                    
+            except (ValueError, TypeError):
+                pass
+        
+        # Check for critical application protocols
+        if hasattr(session, 'appproto') and session.appproto:
+            app_proto = session.appproto.lower()
+            if app_proto in self.config.critical_protocols and flow_id not in self.last_analysis_time:
+                logger.debug(f"Immediate analysis triggered for critical protocol {app_proto} (first check)")
+                return True
         
         current_time = time.time()
         
-        # Time-based trigger
+        # Time-based trigger with port-specific override
         if self.config.use_time_trigger:
             last_time = self.last_analysis_time.get(flow_id, 0)
-            if current_time - last_time >= self.config.time_interval:
+            # Use port-specific time interval if available
+            time_interval = port_specific_thresholds[2] if port_specific_thresholds else self.config.time_interval
+            
+            # More aggressive for critical ports
+            if is_critical_port:
+                time_interval = min(time_interval, 1.0)  # Max 1 second for critical ports
+                
+            if current_time - last_time >= time_interval:
+                logger.debug(f"Time-based trigger ({time_interval}s) for flow {flow_id}: {current_time - last_time:.2f}s elapsed")
                 return True
         
-        # Packet-based trigger
+        # Packet-based trigger with port-specific override
         if self.config.use_packet_trigger:
             # Get current packet count
             total_packets = session.total_fwd_packets + session.total_bwd_packets
             last_packets = self.last_packet_count.get(flow_id, 0)
             
+            # Use port-specific packet threshold if available
+            packet_threshold = port_specific_thresholds[0] if port_specific_thresholds else self.config.packet_threshold
+            
             # First check threshold, then check increment
-            if last_packets == 0 and total_packets >= self.config.packet_threshold:
+            if last_packets == 0 and total_packets >= packet_threshold:
+                logger.debug(f"Packet threshold trigger for flow {flow_id}: {total_packets} packets (threshold: {packet_threshold})")
                 return True
             elif last_packets > 0 and total_packets - last_packets >= self.config.packet_increment:
-                return True
+                # Use smaller increment for critical ports
+                increment = max(2, self.config.packet_increment // 2) if is_critical_port else self.config.packet_increment
+                if total_packets - last_packets >= increment:
+                    logger.debug(f"Packet increment trigger for flow {flow_id}: {total_packets - last_packets} new packets")
+                    return True
         
-        # Byte-based trigger
+        # Byte-based trigger with port-specific override
         if self.config.use_byte_trigger:
             # Get current byte count
             total_bytes = session.total_fwd_bytes + session.total_bwd_bytes
             last_bytes = self.last_byte_count.get(flow_id, 0)
             
+            # Use port-specific byte threshold if available
+            byte_threshold = port_specific_thresholds[1] if port_specific_thresholds else self.config.byte_threshold
+            
             # First check threshold, then check increment
-            if last_bytes == 0 and total_bytes >= self.config.byte_threshold:
+            if last_bytes == 0 and total_bytes >= byte_threshold:
+                logger.debug(f"Byte threshold trigger for flow {flow_id}: {total_bytes} bytes (threshold: {byte_threshold})")
                 return True
             elif last_bytes > 0 and total_bytes - last_bytes >= self.config.byte_increment:
-                return True
+                # Use smaller increment for critical ports
+                increment = max(500, self.config.byte_increment // 2) if is_critical_port else self.config.byte_increment
+                if total_bytes - last_bytes >= increment:
+                    logger.debug(f"Byte increment trigger for flow {flow_id}: {total_bytes - last_bytes} new bytes")
+                    return True
         
         return False
-    
+
     def analyze_session(self, session) -> Optional[Dict[str, Any]]:
         """
         Analyze a session incrementally
@@ -165,6 +225,27 @@ class IncrementalAnalyzer:
         """
         try:
             flow_id = session.flow_id
+            analysis_start_time = time.time()
+            
+            # Calculate detection latency if starttime is available
+            detection_latency = None
+            start_time_str = None
+            
+            if hasattr(session, 'starttime') and session.starttime:
+                start_time_str = session.starttime
+                try:
+                    from dateutil import parser
+                    import datetime
+                    start_time = parser.parse(session.starttime.replace('Z', '+00:00'))
+                    current_time = datetime.datetime.now(datetime.timezone.utc)
+                    detection_latency = (current_time - start_time).total_seconds()
+                    logger.info(f"Flow {flow_id} detection latency: {detection_latency:.2f}s from start time {start_time_str}")
+                except Exception as e:
+                    logger.warning(f"Failed to calculate detection latency: {e}")
+            
+            # Determine trigger reason
+            trigger_reason = self._determine_trigger_reason(session)
+            logger.debug(f"Analyzing flow {flow_id} triggered by: {trigger_reason}")
             
             # Extract features incrementally
             features = self.extract_incremental_features(session)
@@ -173,22 +254,33 @@ class IncrementalAnalyzer:
             ml_result, stat_result, combined_score = self.anomaly_detector.detect_anomalies(features)
             
             # Update analysis trackers
-            self.last_analysis_time[flow_id] = time.time()
+            self.last_analysis_time[flow_id] = analysis_start_time
             self.last_packet_count[flow_id] = session.total_fwd_packets + session.total_bwd_packets
             self.last_byte_count[flow_id] = session.total_fwd_bytes + session.total_bwd_bytes
             
             # Increment counter
             self.analyzed_flow_count += 1
             
+            # Calculate analysis time
+            analysis_duration = time.time() - analysis_start_time
+            
             # Check for anomaly and generate alert if needed
             is_anomalous = (ml_result.get('is_anomalous', False) or 
-                           stat_result.get('is_anomalous', False) or
-                           combined_score > 0.7)
+                        stat_result.get('is_anomalous', False) or
+                        combined_score > 0.7)
             
             if is_anomalous:
                 # Mark flow as alerted
                 self.alerted_flows.add(flow_id)
                 self.anomalous_flow_count += 1
+                
+                # Get port for logging
+                port = None
+                if hasattr(session, 'dport'):
+                    try:
+                        port = int(session.dport)
+                    except (ValueError, TypeError):
+                        port = session.dport
                 
                 # Construct result
                 result = {
@@ -208,8 +300,26 @@ class IncrementalAnalyzer:
                     'combined_score': combined_score,
                     'is_anomalous': True,
                     'is_incremental': True,  # Flag to indicate this was from incremental analysis
+                    'detection_latency': detection_latency,  # Add detection latency information
+                    'analysis_duration': analysis_duration,  # Time taken to analyze
+                    'trigger_reason': trigger_reason,  # Why this analysis was triggered
+                    'start_time': start_time_str,  # Flow start time for reference
                     'session': session  # Include full session for reference
                 }
+                
+                # Log detection details
+                logger.info(f"INCREMENTAL ANOMALY DETECTED - Flow {flow_id}")
+                logger.info(f"  Source: {session.saddr}:{session.sport} → Destination: {session.daddr}:{session.dport}")
+                logger.info(f"  Protocol: {session.proto}/{session.appproto}")
+                if port in self.config.critical_ports:
+                    logger.info(f"  Critical service: Yes (port {port})")
+                logger.info(f"  Detection latency: {detection_latency:.2f}s")
+                logger.info(f"  Analysis time: {analysis_duration:.4f}s")
+                logger.info(f"  Trigger reason: {trigger_reason}")
+                logger.info(f"  Total packets: {session.total_fwd_packets + session.total_bwd_packets}")
+                logger.info(f"  Total bytes: {session.total_fwd_bytes + session.total_bwd_bytes}")
+                logger.info(f"  ML Score: {ml_result.get('score', 0):.4f}, Statistical Score: {stat_result.get('score', 0):.4f}")
+                logger.info(f"  Combined Score: {combined_score:.4f}")
                 
                 # Generate alert
                 if self.alert_callback:
@@ -224,6 +334,51 @@ class IncrementalAnalyzer:
             import traceback
             logger.error(traceback.format_exc())
             return None
+
+    
+    def _determine_trigger_reason(self, session) -> str:
+        """Determine the reason why this session was analyzed"""
+        flow_id = session.flow_id
+        
+        # Check if this is the first analysis
+        if flow_id not in self.last_analysis_time:
+            # Check for critical port or protocol
+            if hasattr(session, 'dport'):
+                try:
+                    port = int(session.dport)
+                    if port in self.config.critical_ports:
+                        return f"Critical port ({port})"
+                except (ValueError, TypeError):
+                    pass
+            
+            if hasattr(session, 'appproto') and session.appproto and session.appproto.lower() in self.config.critical_protocols:
+                return f"Critical protocol ({session.appproto})"
+                
+            return "Initial analysis"
+        
+        # Check for time-based trigger
+        current_time = time.time()
+        last_time = self.last_analysis_time.get(flow_id, 0)
+        if current_time - last_time >= self.config.time_interval:
+            return f"Time interval ({current_time - last_time:.2f}s)"
+        
+        # Check for packet-based trigger
+        total_packets = session.total_fwd_packets + session.total_bwd_packets
+        last_packets = self.last_packet_count.get(flow_id, 0)
+        if last_packets == 0 and total_packets >= self.config.packet_threshold:
+            return f"Packet threshold ({total_packets} packets)"
+        elif last_packets > 0 and total_packets - last_packets >= self.config.packet_increment:
+            return f"Packet increment ({total_packets - last_packets} new packets)"
+        
+        # Check for byte-based trigger
+        total_bytes = session.total_fwd_bytes + session.total_bwd_bytes
+        last_bytes = self.last_byte_count.get(flow_id, 0)
+        if last_bytes == 0 and total_bytes >= self.config.byte_threshold:
+            return f"Byte threshold ({total_bytes} bytes)"
+        elif last_bytes > 0 and total_bytes - last_bytes >= self.config.byte_increment:
+            return f"Byte increment ({total_bytes - last_bytes} new bytes)"
+        
+        return "Unknown trigger"  
     
     def extract_incremental_features(self, session) -> pd.DataFrame:
         """

@@ -129,17 +129,31 @@ class HybridNIDS:
             # Initialize incremental analyzer if enabled
             if self.incremental_analysis:
                 from utils.incremental_analyzer import IncrementalAnalyzer, AnalysisTrigger
-                
-                # Configure incremental analysis triggers
+                            
+                # Configure incremental analysis triggers with aggressive thresholds
                 analysis_config = AnalysisTrigger(
-                    time_interval=10.0,       # Check every 10 seconds
-                    packet_threshold=5,       # First check after 5 packets
-                    packet_increment=10,      # Then every 10 more packets
-                    byte_threshold=1000,      # First check after 1KB
-                    byte_increment=5000,      # Then every 5KB more
+                    time_interval=3.0,       # Check every 3 seconds (reduced from 10)
+                    packet_threshold=3,      # First check after 3 packets (reduced from 5)
+                    packet_increment=5,      # Then every 5 more packets (reduced from 10)
+                    byte_threshold=500,      # First check after 500B (reduced from 1KB)
+                    byte_increment=2000,     # Then every 2KB more (reduced from 5KB)
                     use_time_trigger=True,
                     use_packet_trigger=True,
-                    use_byte_trigger=True
+                    use_byte_trigger=True,
+                    # Per-port thresholds with very aggressive settings for critical services
+                    port_thresholds={
+                        22: (1, 100, 1.0),    # SSH - analyze after 1 packet, 100 bytes, or 1 second
+                        23: (1, 100, 1.0),    # Telnet - extremely aggressive
+                        21: (1, 200, 1.0),    # FTP - extremely aggressive
+                        3389: (2, 200, 1.0),  # RDP - very aggressive
+                        445: (2, 300, 2.0),   # SMB - aggressive
+                        139: (2, 300, 2.0),   # NetBIOS - aggressive
+                        1433: (2, 300, 2.0),  # MSSQL - aggressive
+                        3306: (2, 300, 2.0),  # MySQL - aggressive
+                        53: (2, 300, 2.0),    # DNS - aggressive
+                        80: (3, 500, 3.0),    # HTTP - moderately aggressive
+                        443: (3, 500, 3.0),   # HTTPS - moderately aggressive
+                    }
                 )
                 
                 # Create incremental analyzer
@@ -150,7 +164,7 @@ class HybridNIDS:
                     config=analysis_config
                 )
                 
-                logger.info("Incremental analysis enabled with real-time detection")
+                logger.info("Incremental analysis enabled with real-time detection and aggressive thresholds for critical services")
             else:
                 self.incremental_analyzer = None
                 logger.info("Incremental analysis disabled, using only finalized sessions")
@@ -820,6 +834,31 @@ class HybridNIDS:
                     message += f"  → Traffic volume anomaly (score: {behavioral_features.get('volume_anomaly_score', 0):.2f})\n"
                     message += f"     Bytes per second: {behavioral_features.get('bytes_sent_per_second', 0):.2f}\n"
                     message += f"     Packets per second: {behavioral_features.get('packets_sent_per_second', 0):.2f}\n"
+            
+            message += "-" * 40 + "\n"
+            
+            if alert_data.get('is_incremental', False):
+                message += "-" * 40 + "\n"
+                message += "INCREMENTAL DETECTION INFORMATION:\n"
+                
+                # Add detection latency information
+                if 'detection_latency' in alert_data and alert_data['detection_latency'] is not None:
+                    message += f"Detection Latency: {alert_data['detection_latency']:.2f} seconds\n"
+                
+                # Add trigger reason
+                if 'trigger_reason' in alert_data:
+                    message += f"Trigger Reason: {alert_data['trigger_reason']}\n"
+                
+                # Add analysis time
+                if 'analysis_duration' in alert_data:
+                    message += f"Analysis Time: {alert_data['analysis_duration']:.4f} seconds\n"
+                
+                # Add flow start time
+                if 'start_time' in alert_data and alert_data['start_time']:
+                    message += f"Flow Start Time: {alert_data['start_time']}\n"
+                
+                # Add incremental flag
+                message += "Detection Mode: Early Detection (active flow)\n"
             
             message += "-" * 40 + "\n"
             
