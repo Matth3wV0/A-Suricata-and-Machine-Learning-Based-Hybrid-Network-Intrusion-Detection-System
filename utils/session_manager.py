@@ -291,15 +291,19 @@ class SuricataSession:
         return app_info
 
 
+
 class SessionManager:
-    """Manages flow sessions and aggregates related events"""
+    """Manages flow sessions and aggregates related events with incremental analysis"""
     
-    def __init__(self, session_timeout: int = 60, max_sessions: int = 10000):
-        """Initialize session manager
+    def __init__(self, session_timeout: int = 60, max_sessions: int = 10000,
+                incremental_analyzer = None, incremental_interval: float = 5.0):
+        """Initialize session manager with incremental analysis support
         
         Args:
             session_timeout: Time in seconds before a session is considered expired
             max_sessions: Maximum number of sessions to keep in memory
+            incremental_analyzer: Analyzer for incremental (partial) sessions
+            incremental_interval: Time interval for incremental analysis in seconds
         """
         self.session_timeout = session_timeout
         self.max_sessions = max_sessions
@@ -307,6 +311,11 @@ class SessionManager:
         self.closed_sessions: List[SuricataSession] = []
         self.session_by_ip: Dict[str, Set[str]] = defaultdict(set)
         self.session_by_dest_port: Dict[int, Set[str]] = defaultdict(set)
+        
+        # Incremental analysis support
+        self.incremental_analyzer = incremental_analyzer
+        self.incremental_interval = incremental_interval
+        self.last_incremental_analysis = time.time()
         
         # Statistics
         self.stats = {
@@ -319,7 +328,9 @@ class SessionManager:
             'dns_events': 0,
             'tls_events': 0,
             'ssh_events': 0,
-            'file_events': 0
+            'file_events': 0,
+            'incremental_analyses': 0,
+            'incremental_alerts': 0
         }
     
     def process_event(self, event: Any) -> Optional[SuricataSession]:
@@ -378,23 +389,116 @@ class SessionManager:
                 session.update_from_http(event)
                 self.stats['http_events'] += 1
                 
+                # Check incremental analysis on HTTP events
+                self._check_immediate_analysis(session, event)
+                
             elif isinstance(event, SuricataDNS):
                 session.update_from_dns(event)
                 self.stats['dns_events'] += 1
+                
+                # Check incremental analysis on DNS events
+                self._check_immediate_analysis(session, event)
                 
             elif isinstance(event, SuricataTLS):
                 session.update_from_tls(event)
                 self.stats['tls_events'] += 1
                 
+                # Check incremental analysis on TLS events
+                self._check_immediate_analysis(session, event)
+                
             elif isinstance(event, SuricataSSH):
                 session.update_from_ssh(event)
                 self.stats['ssh_events'] += 1
                 
+                # Check incremental analysis on SSH events (high priority)
+                self._check_immediate_analysis(session, event, high_priority=True)
+                
             elif isinstance(event, SuricataFile):
                 session.update_from_file(event)
                 self.stats['file_events'] += 1
+                
+                # Check incremental analysis on File events
+                self._check_immediate_analysis(session, event)
+        
+        # Check if it's time for periodic incremental analysis
+        self._check_periodic_analysis()
         
         return finalized_session
+    
+    def _check_periodic_analysis(self):
+        """Check if it's time for periodic incremental analysis of all active sessions"""
+        # Skip if incremental analyzer is not configured
+        if not self.incremental_analyzer:
+            return
+            
+        current_time = time.time()
+        
+        # Check if enough time has passed since last analysis
+        if current_time - self.last_incremental_analysis >= self.incremental_interval:
+            # Run incremental analysis on all active sessions
+            results = self.incremental_analyzer.analyze_active_sessions(self.sessions)
+            
+            # Update statistics
+            self.stats['incremental_analyses'] += len(self.sessions)
+            self.stats['incremental_alerts'] += len(results)
+            
+            # Update last analysis time
+            self.last_incremental_analysis = current_time
+    
+    def _check_immediate_analysis(self, session, event, high_priority=False):
+        """Check if immediate incremental analysis should be performed
+        
+        Args:
+            session: Active session to potentially analyze
+            event: The event that triggered this check
+            high_priority: Whether this is a high-priority protocol (SSH, RDP, etc.)
+        """
+        # Skip if incremental analyzer is not configured
+        if not self.incremental_analyzer:
+            return
+            
+        # For high-priority protocols like SSH, we analyze on every event
+        if high_priority:
+            self._run_incremental_analysis_on_session(session)
+            return
+            
+        # For application-layer events, check heuristics
+        
+        # HTTP POST or suspicious methods
+        if isinstance(event, SuricataHTTP) and hasattr(event, 'method'):
+            if event.method in ['POST', 'PUT', 'DELETE'] or event.method not in ['GET', 'HEAD', 'OPTIONS']:
+                self._run_incremental_analysis_on_session(session)
+                return
+                
+        # DNS with suspicious patterns
+        if isinstance(event, SuricataDNS) and hasattr(event, 'query'):
+            query = event.query
+            # Check for suspicious DNS patterns (long queries, many subdomains, etc.)
+            if len(query) > 50 or query.count('.') > 4:
+                self._run_incremental_analysis_on_session(session)
+                return
+                
+        # TLS with unusual patterns
+        if isinstance(event, SuricataTLS):
+            # Always analyze TLS for critical services
+            self._run_incremental_analysis_on_session(session)
+            return
+            
+        # For other events, let the incremental analyzer decide based on its triggers
+        if self.incremental_analyzer.should_analyze_session(session):
+            self._run_incremental_analysis_on_session(session)
+            
+    def _run_incremental_analysis_on_session(self, session):
+            """Run incremental analysis on a single active session"""
+            if not self.incremental_analyzer:
+                return
+                
+            result = self.incremental_analyzer.analyze_session(session)
+            self.stats['incremental_analyses'] += 1
+            
+            if result and result.get('is_anomalous', False):
+                self.stats['incremental_alerts'] += 1     
+    
     
     def get_session(self, flow_id: str) -> Optional[SuricataSession]:
         """Get session by flow_id"""
