@@ -573,6 +573,12 @@ class HybridNIDS:
         # The session manager will now perform incremental analysis on active flows
         finalized_session = self.session_manager.process_event(event)
         
+        # Add debug logging after session manager processing
+        if hasattr(self, 'incremental_analyzer') and hasattr(self.session_manager, 'sessions'):
+            active_sessions = len(self.session_manager.sessions)
+            logger.info(f"Active sessions: {active_sessions}, Has incremental analyzer: {self.incremental_analyzer is not None}")
+            
+        
         # If session was finalized, process it
         if finalized_session:
             # Run finalizer on the session

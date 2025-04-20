@@ -405,6 +405,10 @@ class SessionManager:
             
             # Perform incremental analysis if we have an analyzer
             # This allows us to detect anomalies while the session is still active
+            print('='*40)
+            print(finalized_session)
+            print('='*40)
+            
             if self.incremental_analyzer and not finalized_session:
                 # Only analyze for certain types of events that may indicate meaningful changes
                 # This reduces computational overhead while still catching important updates
