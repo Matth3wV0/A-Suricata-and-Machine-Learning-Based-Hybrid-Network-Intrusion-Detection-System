@@ -999,9 +999,9 @@ class HybridNIDS:
         
         # Session information
         session = alert_data.get('session', {})
-        print(alert_data)
-        print(session)
-        logger.info(f"Flow ID: {session.get('flow_id', 'Unknown')}")
+        # print(alert_data)
+        # print(session)
+        logger.info(f"Flow ID: {session.flow_id}")
         logger.info(f"Duration: {alert_data.get('duration', 0):.3f} seconds")
         
         # App layer info
