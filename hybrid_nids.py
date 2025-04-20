@@ -817,7 +817,7 @@ class HybridNIDS:
                 message += f"Error processing traffic statistics: {str(e)}\n"
             
             # Connection state
-            if 'state' in session:
+            if session.state:
                 message += f"Connection State: {session.state}\n"
             
             # Anomaly detection results
