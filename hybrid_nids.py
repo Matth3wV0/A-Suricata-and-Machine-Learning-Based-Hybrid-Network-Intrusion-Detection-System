@@ -576,7 +576,7 @@ class HybridNIDS:
         # Add debug logging after session manager processing
         if hasattr(self, 'incremental_analyzer') and hasattr(self.session_manager, 'sessions'):
             active_sessions = len(self.session_manager.sessions)
-            logger.info(f"Active sessions: {active_sessions}, Has incremental analyzer: {self.incremental_analyzer is not None}")
+            logger.info(f"Active sessions: {active_sessions}, Has incremental analyzer: {self.incremental_analyzer}")
             
         
         # If session was finalized, process it

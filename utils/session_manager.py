@@ -406,6 +406,7 @@ class SessionManager:
             # Perform incremental analysis if we have an analyzer
             # This allows us to detect anomalies while the session is still active
             print('='*40)
+            print(self.incremental_analyzer)
             print(finalized_session)
             print('='*40)
             
