@@ -406,12 +406,12 @@ class TelegramAlerter:
         
         # Check application layer details
         app_layer_anomalies = []
-        if session.get('http_event_count', 0) > 0:
-            if session.get('http_error', False):
+        if session.http_event_count > 0:
+            if session.http_error:
                 app_layer_anomalies.append("HTTP errors detected")
         
-        if session.get('dns_event_count', 0) > 0:
-            if session.get('dns_failure', False):
+        if session.dns_event_count > 0:
+            if session.dns_failure:
                 app_layer_anomalies.append("DNS failures detected")
                 
         if app_layer_anomalies:
