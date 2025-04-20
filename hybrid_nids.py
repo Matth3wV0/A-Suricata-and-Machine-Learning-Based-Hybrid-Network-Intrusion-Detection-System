@@ -788,11 +788,11 @@ class HybridNIDS:
                     message += f"TLS SNI: {', '.join(session.tls_sni)}\n"
             
             # Add flow timing information
-            if alert_data['session'].get('starttime'):
+            if session.starttime:
                 message += f"Flow Start: {session.starttime}\n"
-            if alert_data['session'].get('endtime'):
+            if session.endtime:
                 message += f"Flow End: {session.endtime}\n"
-            if alert_data['session'].get('duration'):
+            if alert_data.duration:
                 message += f"Duration: {float(alert_data.duration):.3f} seconds\n"
             
             # Traffic volume stats
