@@ -45,7 +45,6 @@ from utils.service_whitelist import ServiceWhitelist
 from utils.session_manager import SessionManager, SuricataSession
 from utils.behavioral_analyzer import BehavioralAnalyzer
 from utils.flow_finalizer import FlowFinalizer
-from utils.incremental_flow_analyzer import IncrementalFlowAnalyzer
 
 # Configure logging
 logging.basicConfig(
@@ -76,8 +75,8 @@ ALIGNED_FEATURES = [
 
 class HybridNIDS:
     """
-    Enhanced Hybrid Network Intrusion Detection System with continuous flow monitoring
-    that combines signature-based detection with real-time ML-based anomaly detection.
+    Enhanced Hybrid Network Intrusion Detection System with session and behavioral awareness
+    that combines signature-based detection with advanced anomaly detection capabilities.
     """
     
     def __init__(self, model_dir='./model', telegram_enabled=False):
@@ -104,6 +103,18 @@ class HybridNIDS:
         # Get current directory for session file
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
         
+        # Initialize new components
+        self.session_manager = SessionManager(
+            session_timeout=120,  # 2 minutes timeout for sessions
+            max_sessions=50000    # Maximum sessions to keep in memory
+        )
+        
+        self.behavioral_analyzer = BehavioralAnalyzer(
+            window_size=300,       # 5 minutes window for behavioral analysis
+            cleanup_interval=60,   # Cleanup every minute
+            max_tracked_ips=10000  # Maximum IPs to track
+        )
+        
         # Ensure model directory exists
         os.makedirs(model_dir, exist_ok=True)
         
@@ -114,30 +125,6 @@ class HybridNIDS:
             
             # Initialize anomaly detector
             self.anomaly_detector = AnomalyDetector(model_dir=model_dir)
-            
-            # Initialize incremental flow analyzer for continuous monitoring
-            self.incremental_analyzer = IncrementalFlowAnalyzer(
-                feature_extractor=self.feature_extractor,
-                anomaly_detector=self.anomaly_detector,
-                alert_callback=self.handle_alert,
-                analysis_interval=10,  # Check flows every 10 seconds
-                min_packets_threshold=8,  # Start analyzing after 8 packets
-                min_duration_threshold=3.0  # Start analyzing after 3 seconds
-            )
-            
-            # Initialize session manager with incremental analyzer
-            self.session_manager = SessionManager(
-                session_timeout=120,  # 2 minutes timeout for sessions
-                max_sessions=50000,   # Maximum sessions to keep in memory
-                incremental_analyzer=self.incremental_analyzer  # Pass the analyzer
-            )
-            
-            # Initialize behavioral analyzer
-            self.behavioral_analyzer = BehavioralAnalyzer(
-                window_size=300,       # 5 minutes window for behavioral analysis
-                cleanup_interval=60,   # Cleanup every minute
-                max_tracked_ips=10000  # Maximum IPs to track
-            )
             
             # Initialize flow finalizer
             self.flow_finalizer = FlowFinalizer(
@@ -153,11 +140,6 @@ class HybridNIDS:
         except Exception as e:
             logger.warning(f"Could not load models: {e}")
             self.models = None
-            self.session_manager = SessionManager(
-                session_timeout=120,
-                max_sessions=50000
-            )
-            self.behavioral_analyzer = BehavioralAnalyzer()
         
     def load_models(self):
         """Load trained models and related files."""
@@ -548,7 +530,6 @@ class HybridNIDS:
         """
         if not event:
             return None
-            
         # Whitelist check for events
         try:
             # Skip processing for trusted internal devices like pfSense
@@ -566,18 +547,13 @@ class HybridNIDS:
                     logger.debug(f"Skipping whitelisted service: {event.daddr}:{dport} ({event.proto})")
                     return None
                 
+                
         except Exception as e:
             logger.debug(f"Error in whitelist check: {e}")
             
-        # Process event through session manager
-        # The session manager will now perform incremental analysis on active flows
-        finalized_session = self.session_manager.process_event(event)
-        
-        # Add debug logging after session manager processing
-        if hasattr(self, 'incremental_analyzer') and hasattr(self.session_manager, 'sessions'):
-            active_sessions = len(self.session_manager.sessions)
-            logger.info(f"Active sessions: {active_sessions}, Has incremental analyzer: {self.incremental_analyzer}")
             
+        # Process event through session manager
+        finalized_session = self.session_manager.process_event(event)
         
         # If session was finalized, process it
         if finalized_session:
@@ -1023,7 +999,7 @@ class HybridNIDS:
                 logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
             
     def monitor_suricata_file(self, file_path, output_file=None):
-        """Monitor a Suricata JSON log file in real-time with continuous flow analysis"""
+        """Monitor a Suricata JSON log file in real-time with session and behavior awareness."""
         logger.info(f"Monitoring Suricata JSON log file: {file_path}")
         self.output_file = output_file
         
@@ -1038,8 +1014,6 @@ class HybridNIDS:
         processed_events = 0
         finalized_sessions = 0
         anomalies_detected = 0
-        incremental_analyses = 0
-        incremental_detections = 0
         last_cleanup = time.time()
         last_stats_update = time.time()
         
@@ -1073,7 +1047,7 @@ class HybridNIDS:
                                 
                                 processed_events += 1
                                 
-                                # Process through session manager with incremental analysis
+                                # Process through session manager
                                 result = self.process_suricata_event(event)
                                 
                                 if result:
@@ -1106,29 +1080,12 @@ class HybridNIDS:
                     # Clean up behavioral analyzer
                     self.behavioral_analyzer.cleanup()
                     
-                    # Clean up incremental analyzer
-                    if hasattr(self, 'incremental_analyzer'):
-                        self.incremental_analyzer.cleanup()
-                    
                     last_cleanup = current_time
                 
                 # Print status update every minute
                 if current_time - last_stats_update > 60:
                     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    # Get incremental stats if available
-                    if hasattr(self, 'incremental_analyzer'):
-                        inc_stats = self.incremental_analyzer.get_stats()
-                        incremental_analyses = inc_stats.get('total_analyzed', 0)
-                        incremental_detections = inc_stats.get('total_alerts', 0)
-                        
-                        # Include incremental analysis stats in the log
-                        logger.info(f"[{now}] Processed: {processed_events} | Sessions: {finalized_sessions} | "
-                                   f"Alerts: {anomalies_detected} | Inc. Analyses: {incremental_analyses} | "
-                                   f"Inc. Detections: {incremental_detections}")
-                    else:
-                        logger.info(f"[{now}] Processed: {processed_events} | Sessions: {finalized_sessions} | "
-                                   f"Alerts: {anomalies_detected}")
+                    logger.info(f"[{now}] Processed: {processed_events} | Sessions: {finalized_sessions} | Alerts: {anomalies_detected}")
                     
                     # Check for suspicious IPs based on behavioral analysis
                     top_anomalous = self.behavioral_analyzer.get_top_anomalous_ips(5)
@@ -1140,8 +1097,8 @@ class HybridNIDS:
                     
                     last_stats_update = current_time
                 
-                # Sleep for a shorter time to improve responsiveness
-                time.sleep(0.5)  # Reduced from 1s to 0.5s for better response time
+                # Sleep for a second
+                time.sleep(1)
         
         except KeyboardInterrupt:
             # Print summary when stopped
@@ -1151,19 +1108,9 @@ class HybridNIDS:
             logger.info(f"Processed events: {processed_events}")
             logger.info(f"Finalized sessions: {finalized_sessions}")
             logger.info(f"Anomalies detected: {anomalies_detected}")
-            
-            # Include incremental analysis stats in summary
-            if hasattr(self, 'incremental_analyzer'):
-                inc_stats = self.incremental_analyzer.get_stats()
-                logger.info(f"Incremental analyses: {inc_stats.get('total_analyzed', 0)}")
-                logger.info(f"Incremental detections: {inc_stats.get('total_alerts', 0)}")
-                logger.info(f"Transitions (benign→malicious): {inc_stats.get('benign_to_malicious', 0)}")
-                logger.info(f"Transitions (malicious→benign): {inc_stats.get('malicious_to_benign', 0)}")
-            
             logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
             logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")
-            if hasattr(self, 'flow_finalizer'):
-                logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
+            logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
 
 
 def parse_args():

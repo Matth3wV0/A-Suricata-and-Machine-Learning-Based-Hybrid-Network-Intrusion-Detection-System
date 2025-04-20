@@ -292,16 +292,14 @@ class SuricataSession:
 
 
 class SessionManager:
-    """Manages flow sessions and aggregates related events with incremental analysis support"""
+    """Manages flow sessions and aggregates related events"""
     
-    def __init__(self, session_timeout: int = 60, max_sessions: int = 10000,
-                incremental_analyzer = None):
+    def __init__(self, session_timeout: int = 60, max_sessions: int = 10000):
         """Initialize session manager
         
         Args:
             session_timeout: Time in seconds before a session is considered expired
             max_sessions: Maximum number of sessions to keep in memory
-            incremental_analyzer: Optional IncrementalFlowAnalyzer for continuous monitoring
         """
         self.session_timeout = session_timeout
         self.max_sessions = max_sessions
@@ -309,11 +307,6 @@ class SessionManager:
         self.closed_sessions: List[SuricataSession] = []
         self.session_by_ip: Dict[str, Set[str]] = defaultdict(set)
         self.session_by_dest_port: Dict[int, Set[str]] = defaultdict(set)
-        
-        # Incremental flow analyzer for continuous monitoring
-        self.incremental_analyzer = incremental_analyzer
-        self.last_incremental_check = time.time()
-        self.incremental_check_interval = 5  # Check active flows every 5 seconds
         
         # Statistics
         self.stats = {
@@ -326,13 +319,11 @@ class SessionManager:
             'dns_events': 0,
             'tls_events': 0,
             'ssh_events': 0,
-            'file_events': 0,
-            'incremental_analyses': 0,
-            'incremental_detections': 0
+            'file_events': 0
         }
     
     def process_event(self, event: Any) -> Optional[SuricataSession]:
-        """Process Suricata event and update corresponding session with incremental analysis
+        """Process Suricata event and update corresponding session
         
         Args:
             event: Suricata event object
@@ -402,107 +393,8 @@ class SessionManager:
             elif isinstance(event, SuricataFile):
                 session.update_from_file(event)
                 self.stats['file_events'] += 1
-            
-            # Perform incremental analysis if we have an analyzer
-            # This allows us to detect anomalies while the session is still active
-            print('='*40)
-            print(self.incremental_analyzer)
-            print(finalized_session)
-            print('='*40)
-            
-            if self.incremental_analyzer and not finalized_session:
-                # Only analyze for certain types of events that may indicate meaningful changes
-                # This reduces computational overhead while still catching important updates
-                should_analyze = False
-                print(should_analyze)
-                if isinstance(event, SuricataFlow):
-                    # Always analyze flow updates as they contain core metrics
-                    should_analyze = True
-                elif isinstance(event, SuricataHTTP) and session.http_event_count <= 5:
-                    # Analyze early HTTP events (first few are most indicative)
-                    should_analyze = True
-                elif isinstance(event, (SuricataSSH, SuricataTLS)):
-                    # Always analyze SSH and TLS events as they often indicate authentication attempts
-                    should_analyze = True
-                elif isinstance(event, SuricataDNS) and session.dns_event_count <= 2:
-                    # Analyze first few DNS events
-                    should_analyze = True
-                
-                if should_analyze:
-                    # Use the incremental analyzer to check this active flow
-                    result = self.incremental_analyzer.analyze_active_flow(session)
-                    if result:
-                        # We found an anomaly in an active session!
-                        self.stats['incremental_detections'] += 1
-                    print("AAAA")
-                    print(result)
-                    print("AAAA")
-                    
-        # Periodically check active sessions for incremental analysis
-        self._check_active_sessions_for_analysis()
         
         return finalized_session
-    
-    def _check_active_sessions_for_analysis(self):
-        """Periodically check active sessions for incremental analysis"""
-        # Skip if no incremental analyzer or not enough time has passed
-        if not self.incremental_analyzer:
-            return
-            
-        current_time = time.time()
-        if current_time - self.last_incremental_check < self.incremental_check_interval:
-            return
-            
-        self.last_incremental_check = current_time
-        
-        # Focus on:
-        # 1. Long-running sessions (potential tunnels, C2 channels)
-        # 2. Sessions with specific protocols (SSH, database, etc.)
-        # 3. Sessions with significant activity
-        
-        # Get sessions that are candidates for incremental analysis
-        candidates = []
-        active_count = 0
-        
-        for flow_id, session in self.sessions.items():
-            active_count += 1
-            
-            # Only analyze up to 100 sessions at a time to avoid performance impact
-            if active_count > 100:
-                break
-                
-            # Focus on specific high-risk protocols
-            interesting_protocol = False
-            
-            if hasattr(session, 'appproto'):
-                interesting_protocol = session.appproto in ['ssh', 'mysql', 'postgres', 'tls', 'ftp']
-            
-            # Check for high traffic volume or duration
-            high_volume = False
-            long_running = False
-            
-            total_packets = session.total_fwd_packets + session.total_bwd_packets
-            if total_packets > 50:  # Significant traffic
-                high_volume = True
-                
-            if hasattr(session, 'starttime') and session.starttime:
-                try:
-                    from dateutil import parser
-                    start_time = parser.parse(session.starttime)
-                    duration = (current_time - start_time.timestamp())
-                    if duration > 60:  # Longer than 1 minute
-                        long_running = True
-                except:
-                    pass
-            
-            # Add session if it meets any criteria
-            if interesting_protocol or high_volume or long_running:
-                candidates.append(session)
-        
-        # Analyze candidate sessions
-        if candidates:
-            results = self.incremental_analyzer.analyze_active_flows(candidates)
-            self.stats['incremental_analyses'] += len(candidates)
     
     def get_session(self, flow_id: str) -> Optional[SuricataSession]:
         """Get session by flow_id"""

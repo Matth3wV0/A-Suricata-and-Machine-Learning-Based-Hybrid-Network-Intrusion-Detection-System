@@ -135,6 +135,7 @@ class IncrementalFlowAnalyzer:
         """
         # Skip if flow shouldn't be analyzed yet
         if not self.should_analyze_flow(session):
+            print("Not should_analyze_flow")
             return None
         
         try:
