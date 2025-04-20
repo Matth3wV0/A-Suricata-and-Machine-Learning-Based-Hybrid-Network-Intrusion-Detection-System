@@ -164,7 +164,8 @@ class IncrementalFlowAnalyzer:
             # total_packets = session_dict.get('total_fwd_packets', 0) + session_dict.get('total_bwd_packets', 0)
             # if total_packets == 0:
             #     return None
-            
+            total_packets = session_dict.get('total_fwd_packets', 0) + session_dict.get('total_bwd_packets', 0)
+
             # Extract features
             features = self.feature_extractor.extract_from_flow(session_dict)
             
