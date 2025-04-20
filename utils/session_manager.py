@@ -488,16 +488,54 @@ class SessionManager:
         if self.incremental_analyzer.should_analyze_session(session):
             self._run_incremental_analysis_on_session(session)
             
+    # Update the _run_incremental_analysis_on_session method in SessionManager
     def _run_incremental_analysis_on_session(self, session):
-            """Run incremental analysis on a single active session"""
-            if not self.incremental_analyzer:
-                return
-                
-            result = self.incremental_analyzer.analyze_session(session)
-            self.stats['incremental_analyses'] += 1
+        """Run incremental analysis on a single active session with improved critical service handling"""
+        if not self.incremental_analyzer:
+            return
+        
+        # Check if this is a critical service
+        is_critical = False
+        critical_port = None
+        
+        # Check port first
+        if hasattr(session, 'dport') and session.dport:
+            try:
+                port = int(session.dport)
+                if port in [22, 23, 21, 3389, 445, 139, 1433, 3306]:
+                    is_critical = True
+                    critical_port = port
+            except (ValueError, TypeError):
+                pass
+        
+        # Check protocol
+        if hasattr(session, 'appproto') and session.appproto:
+            app_proto = session.appproto.lower()
+            if app_proto in ['ssh', 'telnet', 'ftp', 'rdp', 'smb']:
+                is_critical = True
+        
+        # Extra logging for critical services
+        if is_critical:
+            logger.info(f"CRITICAL SERVICE: Analyzing {session.appproto or 'port '+str(critical_port)} flow {session.flow_id} from {session.saddr} to {session.daddr}")
+        
+        # Run the analysis
+        result = self.incremental_analyzer.analyze_session(session)
+        self.stats['incremental_analyses'] += 1
+        
+        # Log ML scores for debugging (critical services only)
+        if is_critical and result and 'ml_result' in result:
+            ml_result = result.get('ml_result', {})
+            logger.info(f"ML SCORES for {session.appproto or 'port '+str(critical_port)}: " +
+                    f"DT={ml_result.get('dt_confidence', 0):.2f}, " +
+                    f"RF={ml_result.get('rf_confidence', 0):.2f}, " +
+                    f"Combined={result.get('combined_score', 0):.2f}")
+        
+        if result and result.get('is_anomalous', False):
+            # Mark flow as critical for alerting priority
+            if is_critical:
+                result['is_critical_service'] = True
             
-            if result and result.get('is_anomalous', False):
-                self.stats['incremental_alerts'] += 1     
+            self.stats['incremental_alerts'] += 1 
         
     def _check_immediate_analysis(self, session, event, high_priority=False):
         """Check if immediate incremental analysis should be performed

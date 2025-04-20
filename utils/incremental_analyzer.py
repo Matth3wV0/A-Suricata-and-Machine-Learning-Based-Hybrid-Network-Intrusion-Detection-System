@@ -256,7 +256,12 @@ class IncrementalAnalyzer:
                     except (ValueError, TypeError):
                         port = session.dport
                 
-                # Construct result
+                # Check if this is a critical service for priority alerting
+                is_critical_service = False
+                if port in self.config.critical_ports:
+                    is_critical_service = True
+                
+                # Construct result with more ML details
                 result = {
                     'flow_id': flow_id,
                     'timestamp': time.time(),
@@ -274,6 +279,7 @@ class IncrementalAnalyzer:
                     'combined_score': combined_score,
                     'is_anomalous': True,
                     'is_incremental': True,  # Flag to indicate this was from incremental analysis
+                    'is_critical_service': is_critical_service,  # Flag for critical services
                     'detection_latency': detection_latency,  # Add detection latency information
                     'analysis_duration': analysis_duration,  # Time taken to analyze
                     'trigger_reason': trigger_reason,  # Why this analysis was triggered
@@ -295,9 +301,11 @@ class IncrementalAnalyzer:
                 logger.info(f"  ML Score: {ml_result.get('score', 0):.4f}, Statistical Score: {stat_result.get('score', 0):.4f}")
                 logger.info(f"  Combined Score: {combined_score:.4f}")
                 
-                # Generate alert
+                # Generate alert with priority for Telegram
                 if self.alert_callback:
+                    logger.info("Sending immediate alert notification")
                     self.alert_callback(result)
+                
                 
                 # And near the end of the method, after analyzing and before returning:
                 analysis_duration = time.time() - analysis_start_time

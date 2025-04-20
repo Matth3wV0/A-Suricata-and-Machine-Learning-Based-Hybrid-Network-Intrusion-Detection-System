@@ -329,41 +329,101 @@ class TelegramAlerter:
             logger.error("All chat ID formats failed")
             return False
     
-    def format_anomaly_alert(self, alert_data):
-        """Format an anomaly alert message"""
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        session = alert_data.get('session', {})
+# Update the format_anomaly_alert method in TelegramAlerter class
+
+def format_anomaly_alert(self, alert_data):
+    """Format an anomaly alert message with emphasis on ML detection"""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    session = alert_data.get('session', {})
+    
+    # Create a more compact, ML-focused alert format
+    message = f"🚨 ATTACK DETECTED 🚨\n\n"
+    
+    # ML Detection Scores - Show this prominently at the top
+    ml_result = alert_data.get('ml_result', {})
+    stat_result = alert_data.get('stat_result', {})
+    
+    message += "📊 ML DETECTION SCORES:\n"
+    message += f"➡️ Decision Tree: {ml_result.get('dt_confidence', 0):.2f}\n"
+    message += f"➡️ Random Forest: {ml_result.get('rf_confidence', 0):.2f}\n"
+    
+    # Add XGBoost if available
+    if 'xgb_confidence' in ml_result:
+        message += f"➡️ XGBoost: {ml_result.get('xgb_confidence', 0):.2f}\n"
         
-        message = f"⚠️ ANOMALY DETECTED ⚠️\n\n"
-        message += f"Time: {timestamp}\n"
-        message += "-" * 40 + "\n"
+    # Overall score
+    message += f"⭐ COMBINED SCORE: {alert_data.get('combined_score', 0):.2f}\n\n"
+    
+    # Connection details - make this more compact
+    message += "🔗 CONNECTION DETAILS:\n"
+    
+    # Check if this is a critical service and highlight it
+    is_critical = False
+    try:
+        port = int(alert_data.get('dst_port', 0))
+        if port in [22, 23, 21, 3389, 445, 139, 1433, 3306]:
+            is_critical = True
+            message += f"⚠️ CRITICAL SERVICE: Port {port}\n"
+    except (ValueError, TypeError):
+        pass
         
-        # Connection details
-        message += "CONNECTION DETAILS:\n"
-        message += f"Source IP: {alert_data.get('src_ip', 'Unknown')}\n"
-        message += f"Source Port: {alert_data.get('src_port', 'Unknown')}\n"
-        message += f"Destination IP: {alert_data.get('dst_ip', 'Unknown')}\n"
-        message += f"Destination Port: {alert_data.get('dst_port', 'Unknown')}\n"
-        message += f"Protocol: {alert_data.get('proto', 'Unknown')}\n"
+    message += f"Source: {alert_data.get('src_ip', 'Unknown')}:{alert_data.get('src_port', 'Unknown')}\n"
+    message += f"Destination: {alert_data.get('dst_ip', 'Unknown')}:{alert_data.get('dst_port', 'Unknown')}\n"
+    message += f"Protocol: {alert_data.get('proto', 'Unknown')}/{alert_data.get('app_proto', 'Unknown')}\n"
+    
+    # Detection timing information
+    if 'detection_latency' in alert_data:
+        message += f"🕒 Detection Latency: {alert_data.get('detection_latency', 0):.2f}s\n"
+    
+    # Add incremental detection indicator if applicable
+    if alert_data.get('is_incremental', False):
+        message += "⚡ Real-time Detection (active flow)\n"
+    
+    # Traffic statistics in a compact format
+    message += f"\n📊 TRAFFIC:\n"
+    message += f"Bytes: {alert_data.get('total_bytes', 0):,} | "
+    message += f"Packets: {alert_data.get('total_packets', 0):,} | "
+    message += f"Duration: {alert_data.get('duration', 0):.2f}s\n"
+    
+    # Add attack type indicators based on port/protocol
+    message += "\n🔍 ATTACK INDICATORS:\n"
+    
+    port = alert_data.get('dst_port', '')
+    try:
+        port_num = int(port)
         
-        # Add application protocol if available
-        if 'app_proto' in alert_data and alert_data['app_proto']:
-            message += f"App Protocol: {alert_data.get('app_proto', 'Unknown')}\n"
-        
-        # Add anomaly score
-        message += f"\nAnomaly Score: {alert_data.get('combined_score', 0):.4f}\n"
-        
-        # Add statistical anomaly details if available
-        stat_result = alert_data.get('stat_result', {})
-        if stat_result.get('details') and len(stat_result.get('details', [])) > 0:
-            message += "\nStatistical Anomalies:\n"
-            for detail in stat_result.get('details', [])[:3]:  # Show top 3 anomalous features
-                feature = detail.get('feature', 'Unknown')
-                value = detail.get('value', 0)
-                z_score = detail.get('z_score', 0)
-                message += f"- {feature}: {value} (z-score: {z_score:.2f})\n"
-        
-        # Add timestamp
-        message += f"\nAlert generated at {timestamp}"
-        
-        return message
+        if port_num == 22:
+            message += "• SSH brute force attempt detected\n"
+        elif port_num == 23:
+            message += "• Telnet intrusion detected\n"
+        elif port_num == 3389:
+            message += "• RDP attack detected\n"
+        elif port_num == 21:
+            message += "• FTP attack detected\n"
+        elif port_num in [445, 139]:
+            message += "• SMB/NetBIOS attack detected\n"
+        elif port_num in [1433, 3306]:
+            message += "• Database attack detected\n"
+        elif port_num == 80 or port_num == 443:
+            message += "• Web attack detected\n"
+    except (ValueError, TypeError):
+        pass
+    
+    # Check application layer details
+    app_layer_anomalies = []
+    if session.get('http_event_count', 0) > 0:
+        if session.get('http_error', False):
+            app_layer_anomalies.append("HTTP errors detected")
+    
+    if session.get('dns_event_count', 0) > 0:
+        if session.get('dns_failure', False):
+            app_layer_anomalies.append("DNS failures detected")
+            
+    if app_layer_anomalies:
+        for anomaly in app_layer_anomalies:
+            message += f"• {anomaly}\n"
+    
+    # Add timestamp
+    message += f"\n⏰ Alert Time: {timestamp}\n"
+    
+    return message
