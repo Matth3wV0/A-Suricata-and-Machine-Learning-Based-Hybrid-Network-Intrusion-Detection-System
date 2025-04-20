@@ -414,7 +414,7 @@ class SessionManager:
                 # Only analyze for certain types of events that may indicate meaningful changes
                 # This reduces computational overhead while still catching important updates
                 should_analyze = False
-                
+                print(should_analyze)
                 if isinstance(event, SuricataFlow):
                     # Always analyze flow updates as they contain core metrics
                     should_analyze = True
@@ -434,7 +434,7 @@ class SessionManager:
                     if result:
                         # We found an anomaly in an active session!
                         self.stats['incremental_detections'] += 1
-        
+                print(result)
         # Periodically check active sessions for incremental analysis
         self._check_active_sessions_for_analysis()
         
