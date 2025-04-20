@@ -350,7 +350,7 @@ class HybridNIDS:
             for col in numeric_cols:
                 if df[col].isna().sum() > 0:
                     logger.info(f"Column {col} with NaN or infinite values.")
-                    # df[col].fillna(df[col].median(), inplace=True)
+                    df[col].fillna(df[col].median(), inplace=True)
         
         # Drop rows that still have NaN values
         df.dropna(inplace=True)
@@ -368,23 +368,6 @@ class HybridNIDS:
             df['Label'] = np.where((df['label'] == 'BENIGN') | (df['label'] == 'benign'), 0, 1)
             df.drop('label', axis=1, inplace=True)
         
-        # Identify and handle outliers
-        # This is a simple method - you might want to use more sophisticated approaches
-        # numeric_cols = df.select_dtypes(include=['float', 'int']).columns
-        # for col in numeric_cols:
-        #     Q1 = df[col].quantile(0.25)
-        #     Q3 = df[col].quantile(0.75)
-        #     IQR = Q3 - Q1
-            
-        #     extreme_upper = Q3 + 3 * IQR
-        #     extreme_lower = Q1 - 3 * IQR
-            
-        #     # Only remove extreme outliers
-        #     extreme_mask = (df[col] > extreme_upper) | (df[col] < extreme_lower)
-        #     if extreme_mask.sum() > 0 and extreme_mask.sum() < len(df) * 0.01:  # Don't remove more than 1%
-        #         logger.info(f"Capping extreme outliers in {col}: {extreme_mask.sum()} values")
-        #         df.loc[df[col] > extreme_upper, col] = extreme_upper
-        #         df.loc[df[col] < extreme_lower, col] = extreme_lower
         
         logger.info(f"Dataset loaded and preprocessed. Shape: {df.shape}")
         
@@ -936,7 +919,6 @@ class HybridNIDS:
                     message += f"     Bytes per second: {behavioral_features.get('bytes_sent_per_second', 0):.2f}\n"
                     message += f"     Packets per second: {behavioral_features.get('packets_sent_per_second', 0):.2f}\n"
             
-            message += "-" * 40 + "\n"
             
             if alert_data.get('is_incremental', False):
                 message += "-" * 40 + "\n"
