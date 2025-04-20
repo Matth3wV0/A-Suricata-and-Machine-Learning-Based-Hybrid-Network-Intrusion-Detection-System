@@ -180,7 +180,7 @@ class IncrementalFlowAnalyzer:
             
             # Determine if anomalous (ML must detect anomaly for partial flows)
             is_anomalous = ml_result.get('is_anomalous', False)
-            
+            print("P"*30)
             # Check for state changes - flows becoming anomalous
             flow_id = session_dict['flow_id']
             previous_state = self.last_predictions.get(flow_id, {'is_anomalous': False, 'score': 0})
@@ -217,7 +217,8 @@ class IncrementalFlowAnalyzer:
                 'is_partial_analysis': True,
                 'session': session_dict
             }
-            
+            print("O"*30)
+            print(result)
             # Only generate alert if:
             # 1. Flow is anomalous
             # 2. Either:
