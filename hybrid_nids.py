@@ -39,7 +39,7 @@ from telethon import TelegramClient
 from suricata.suricata_parser import SuricataParser
 from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor 
 from utils.anomaly_detector import AnomalyDetector
-from utils.telegram_alert import TelegramAlerter
+from telegram_module.telegram_alert import TelegramAlerter
 from utils.service_whitelist import ServiceWhitelist
 # Import new modules
 from utils.session_manager import SessionManager, SuricataSession
