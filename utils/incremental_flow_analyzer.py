@@ -223,6 +223,7 @@ class IncrementalFlowAnalyzer:
             # 2. Either:
             #    a. This is the first time we're detecting an anomaly (benign → malicious)
             #    b. The score has increased significantly since the last alert
+            print(f"Is Anomalous: {is_anomalous} and {self.alert_callback}")
             if is_anomalous and self.alert_callback:
                 if not previous_state['is_anomalous']:
                     # This is a transition from benign to malicious
