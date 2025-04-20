@@ -112,7 +112,8 @@ class IncrementalAnalyzer:
     
     def should_analyze_session(self, session) -> bool:
         """
-        Determine if a session should be analyzed based on configured triggers
+        Determine if a session should be analyzed - AGGRESSIVE VERSION
+        Always returns True for first packet on critical ports or every N packets
         
         Args:
             session: The SuricataSession to check
@@ -127,91 +128,62 @@ class IncrementalAnalyzer:
         if flow_id in self.alerted_flows:
             return False
         
-        # Check for critical ports - prioritize these for immediate analysis
-        is_critical_port = False
-        port_specific_thresholds = None
+        # FIRST PACKET ANALYSIS - Always analyze sessions we haven't seen before
+        # This ensures immediate analysis for new flows regardless of port/protocol
+        if flow_id not in self.last_analysis_time:
+            logger.debug(f"First packet analysis for new flow {flow_id}")
+            return True
         
+        # Check critical criteria - ALWAYS analyze critical services frequently
+        is_critical = False
+        
+        # Check port
         if hasattr(session, 'dport') and session.dport:
             try:
                 port = int(session.dport)
-                is_critical_port = port in self.config.critical_ports
-                
-                # Get port-specific thresholds if available
-                if port in self.config.port_thresholds:
-                    port_specific_thresholds = self.config.port_thresholds[port]
-                    
-                # First packet analysis for critical ports
-                if is_critical_port and flow_id not in self.last_analysis_time:
-                    logger.debug(f"Immediate analysis triggered for critical port {port} (first check)")
-                    return True
-                    
+                if port in self.config.critical_ports:
+                    is_critical = True
             except (ValueError, TypeError):
                 pass
         
-        # Check for critical application protocols
+        # Check protocol
         if hasattr(session, 'appproto') and session.appproto:
             app_proto = session.appproto.lower()
-            if app_proto in self.config.critical_protocols and flow_id not in self.last_analysis_time:
-                logger.debug(f"Immediate analysis triggered for critical protocol {app_proto} (first check)")
-                return True
+            if app_proto in self.config.critical_protocols:
+                is_critical = True
         
+        # Get current counts
         current_time = time.time()
+        last_time = self.last_analysis_time.get(flow_id, 0)
+        total_packets = session.total_fwd_packets + session.total_bwd_packets
+        last_packets = self.last_packet_count.get(flow_id, 0)
         
-        # Time-based trigger with port-specific override
-        if self.config.use_time_trigger:
-            last_time = self.last_analysis_time.get(flow_id, 0)
-            # Use port-specific time interval if available
-            time_interval = port_specific_thresholds[2] if port_specific_thresholds else self.config.time_interval
-            
-            # More aggressive for critical ports
-            if is_critical_port:
-                time_interval = min(time_interval, 1.0)  # Max 1 second for critical ports
+        # CRITICAL SERVICE - Check every packet or at least every second
+        if is_critical:
+            # For critical services, analyze on EVERY packet change
+            if total_packets > last_packets:
+                logger.debug(f"Analyzing critical flow {flow_id} - new packets: {total_packets - last_packets}")
+                return True
                 
-            if current_time - last_time >= time_interval:
-                logger.debug(f"Time-based trigger ({time_interval}s) for flow {flow_id}: {current_time - last_time:.2f}s elapsed")
+            # Also check every second regardless of packet changes
+            if current_time - last_time >= 1.0:
+                logger.debug(f"Analyzing critical flow {flow_id} - time trigger (1s)")
                 return True
         
-        # Packet-based trigger with port-specific override
-        if self.config.use_packet_trigger:
-            # Get current packet count
-            total_packets = session.total_fwd_packets + session.total_bwd_packets
-            last_packets = self.last_packet_count.get(flow_id, 0)
-            
-            # Use port-specific packet threshold if available
-            packet_threshold = port_specific_thresholds[0] if port_specific_thresholds else self.config.packet_threshold
-            
-            # First check threshold, then check increment
-            if last_packets == 0 and total_packets >= packet_threshold:
-                logger.debug(f"Packet threshold trigger for flow {flow_id}: {total_packets} packets (threshold: {packet_threshold})")
-                return True
-            elif last_packets > 0 and total_packets - last_packets >= self.config.packet_increment:
-                # Use smaller increment for critical ports
-                increment = max(2, self.config.packet_increment // 2) if is_critical_port else self.config.packet_increment
-                if total_packets - last_packets >= increment:
-                    logger.debug(f"Packet increment trigger for flow {flow_id}: {total_packets - last_packets} new packets")
-                    return True
+        # NON-CRITICAL - Still analyze frequently
+        # Check every few packets
+        if total_packets - last_packets >= 2:  # Every 2 packets
+            logger.debug(f"Analyzing flow {flow_id} - packet trigger: {total_packets - last_packets} new packets")
+            return True
         
-        # Byte-based trigger with port-specific override
-        if self.config.use_byte_trigger:
-            # Get current byte count
-            total_bytes = session.total_fwd_bytes + session.total_bwd_bytes
-            last_bytes = self.last_byte_count.get(flow_id, 0)
-            
-            # Use port-specific byte threshold if available
-            byte_threshold = port_specific_thresholds[1] if port_specific_thresholds else self.config.byte_threshold
-            
-            # First check threshold, then check increment
-            if last_bytes == 0 and total_bytes >= byte_threshold:
-                logger.debug(f"Byte threshold trigger for flow {flow_id}: {total_bytes} bytes (threshold: {byte_threshold})")
-                return True
-            elif last_bytes > 0 and total_bytes - last_bytes >= self.config.byte_increment:
-                # Use smaller increment for critical ports
-                increment = max(500, self.config.byte_increment // 2) if is_critical_port else self.config.byte_increment
-                if total_bytes - last_bytes >= increment:
-                    logger.debug(f"Byte increment trigger for flow {flow_id}: {total_bytes - last_bytes} new bytes")
-                    return True
+        # Also check every 3 seconds regardless
+        if current_time - last_time >= 3.0:
+            logger.debug(f"Analyzing flow {flow_id} - time trigger (3s)")
+            return True
         
         return False
+
+
 
     def analyze_session(self, session) -> Optional[Dict[str, Any]]:
         """
@@ -226,6 +198,8 @@ class IncrementalAnalyzer:
         try:
             flow_id = session.flow_id
             analysis_start_time = time.time()
+            logger.info(f"Starting incremental analysis for flow {flow_id} - src={session.saddr}:{session.sport} dst={session.daddr}:{session.dport} proto={session.proto}")
+
             
             # Calculate detection latency if starttime is available
             detection_latency = None
@@ -325,6 +299,18 @@ class IncrementalAnalyzer:
                 if self.alert_callback:
                     self.alert_callback(result)
                 
+                # And near the end of the method, after analyzing and before returning:
+                analysis_duration = time.time() - analysis_start_time
+                if is_anomalous:
+                    logger.info(f"ANOMALY DETECTED in {analysis_duration:.3f}s - flow {flow_id} score={combined_score:.4f}")
+                else:
+                    logger.debug(f"No anomaly detected in {analysis_duration:.3f}s - flow {flow_id} score={combined_score:.4f}")
+
+                # Warn about slow analysis
+                if analysis_duration > 0.1:  # More than 100ms is concerning
+                    logger.warning(f"Slow analysis detected: {analysis_duration:.3f}s for flow {flow_id}")
+                
+
                 return result
             
             return None
