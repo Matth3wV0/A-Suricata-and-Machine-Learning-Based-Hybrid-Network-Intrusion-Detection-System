@@ -138,6 +138,9 @@ class IncrementalFlowAnalyzer:
             return None
         
         try:
+            print("BBB")
+            print(session)
+            print("BBB")
             # Convert session to dict if needed
             session_dict = session if isinstance(session, dict) else asdict(session)
             
