@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Adaptive Feature Extraction from Suricata Flows and Sessions
+This version supports both standard Suricata flows and enriched sessions
+"""
+
 import pandas as pd
 import numpy as np
 import json
@@ -322,97 +328,6 @@ class AdaptiveFlowFeatureExtractor:
         except Exception as e:
             logger.debug(f"Failed to parse timestamp {timestamp}: {e}")
             return None
-      
-    def extract_from_active_flow(self, flow: Any) -> pd.DataFrame:
-        """
-        Extract features from an active (non-finalized) flow
-        Optimized for incremental analysis with partial flow data
-        
-        Args:
-            flow: Active flow object or dictionary
-            
-        Returns:
-            DataFrame with extracted features
-        """
-        try:
-            # Convert flow object to dictionary if it's not already a dict
-            flow_dict = flow if isinstance(flow, dict) else asdict(flow)
-            
-            # Create a copy of the base method for feature extraction
-            features_df = self.extract_from_flow(flow_dict)
-            
-            # Add flags for active flow detection
-            features_df['is_active_flow'] = 1
-            
-            # Handle duration for active flows
-            # For active flows, use the time since flow started
-            if 'starttime' in flow_dict and flow_dict['starttime']:
-                try:
-                    start_time = self._parse_timestamp(flow_dict['starttime'])
-                    if start_time:
-                        current_time = datetime.datetime.now().replace(tzinfo=start_time.tzinfo)
-                        active_duration = (current_time - start_time).total_seconds()
-                        
-                        # Update duration which might be 0 for active flows
-                        features_df['duration'] = active_duration
-                        
-                        # Recalculate rate metrics that depend on duration
-                        if active_duration > 0:
-                            # Get relevant byte and packet counts
-                            total_bytes = features_df.get('total_fwd_bytes', 0) + features_df.get('total_bwd_bytes', 0)
-                            total_packets = features_df.get('total_fwd_packets', 0) + features_df.get('total_bwd_packets', 0)
-                            
-                            # Recalculate rates
-                            features_df['flow_bytes_per_sec'] = total_bytes / active_duration
-                            features_df['flow_packets_per_sec'] = total_packets / active_duration
-                except Exception as e:
-                    pass  # Use default duration if calculation fails
-            
-            # Add rate of change metrics for detection of burst activities
-            # These are especially useful for detecting scan activities
-            features_df['packet_acceleration'] = 0  # Placeholder for packet rate change
-            features_df['byte_acceleration'] = 0    # Placeholder for byte rate change
-            
-            # Add protocol-specific features when available
-            if 'appproto' in flow_dict and flow_dict['appproto']:
-                # HTTP-specific features
-                if flow_dict['appproto'].lower() == 'http':
-                    features_df['is_http'] = 1
-                    
-                    # Check for HTTP method if available
-                    if 'http_methods' in flow_dict and flow_dict['http_methods']:
-                        features_df['has_http_post'] = 1 if 'POST' in flow_dict['http_methods'] else 0
-                        features_df['has_http_get'] = 1 if 'GET' in flow_dict['http_methods'] else 0
-                    
-                # SSH-specific features
-                elif flow_dict['appproto'].lower() == 'ssh':
-                    features_df['is_ssh'] = 1
-                    
-                # DNS-specific features
-                elif flow_dict['appproto'].lower() == 'dns':
-                    features_df['is_dns'] = 1
-                
-                # TLS-specific features
-                elif flow_dict['appproto'].lower() == 'tls':
-                    features_df['is_tls'] = 1
-            
-            # For all other protocols, add 0
-            for proto in ['http', 'ssh', 'dns', 'tls']:
-                if f'is_{proto}' not in features_df.columns:
-                    features_df[f'is_{proto}'] = 0
-                    
-            return features_df
-            
-        except Exception as e:
-            import traceback
-            logger.error(f"Error extracting features from active flow: {e}")
-            logger.error(traceback.format_exc())
-            
-            # Return empty DataFrame with correct columns
-            empty_df = pd.DataFrame(columns=self.selected_features)
-            empty_df.loc[0] = [0] * len(self.selected_features)
-            return empty_df 
-      
             
     def _hash_categorical(self, value: Union[str, bool]) -> int:
         """Convert categorical values to numeric using hash"""

@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Session Manager Module for Hybrid NIDS
+Aggregates Suricata events by flow_id and maintains session state
+"""
+
 import time
 import logging
 import datetime
@@ -285,19 +291,15 @@ class SuricataSession:
         return app_info
 
 
-
 class SessionManager:
-    """Manages flow sessions and aggregates related events with incremental analysis"""
+    """Manages flow sessions and aggregates related events"""
     
-    def __init__(self, session_timeout: int = 60, max_sessions: int = 10000,
-                incremental_analyzer = None, incremental_interval: float = 5.0):
-        """Initialize session manager with incremental analysis support
+    def __init__(self, session_timeout: int = 60, max_sessions: int = 10000):
+        """Initialize session manager
         
         Args:
             session_timeout: Time in seconds before a session is considered expired
             max_sessions: Maximum number of sessions to keep in memory
-            incremental_analyzer: Analyzer for incremental (partial) sessions
-            incremental_interval: Time interval for incremental analysis in seconds
         """
         self.session_timeout = session_timeout
         self.max_sessions = max_sessions
@@ -305,11 +307,6 @@ class SessionManager:
         self.closed_sessions: List[SuricataSession] = []
         self.session_by_ip: Dict[str, Set[str]] = defaultdict(set)
         self.session_by_dest_port: Dict[int, Set[str]] = defaultdict(set)
-        
-        # Incremental analysis support
-        self.incremental_analyzer = incremental_analyzer
-        self.incremental_interval = incremental_interval
-        self.last_incremental_analysis = time.time()
         
         # Statistics
         self.stats = {
@@ -322,9 +319,7 @@ class SessionManager:
             'dns_events': 0,
             'tls_events': 0,
             'ssh_events': 0,
-            'file_events': 0,
-            'incremental_analyses': 0,
-            'incremental_alerts': 0
+            'file_events': 0
         }
     
     def process_event(self, event: Any) -> Optional[SuricataSession]:
@@ -383,235 +378,23 @@ class SessionManager:
                 session.update_from_http(event)
                 self.stats['http_events'] += 1
                 
-                # Check incremental analysis on HTTP events
-                self._check_immediate_analysis(session, event)
-                
             elif isinstance(event, SuricataDNS):
                 session.update_from_dns(event)
                 self.stats['dns_events'] += 1
-                
-                # Check incremental analysis on DNS events
-                self._check_immediate_analysis(session, event)
                 
             elif isinstance(event, SuricataTLS):
                 session.update_from_tls(event)
                 self.stats['tls_events'] += 1
                 
-                # Check incremental analysis on TLS events
-                self._check_immediate_analysis(session, event)
-                
             elif isinstance(event, SuricataSSH):
                 session.update_from_ssh(event)
                 self.stats['ssh_events'] += 1
                 
-                # Check incremental analysis on SSH events (high priority)
-                self._check_immediate_analysis(session, event, high_priority=True)
-                
             elif isinstance(event, SuricataFile):
                 session.update_from_file(event)
                 self.stats['file_events'] += 1
-                
-                # Check incremental analysis on File events
-                self._check_immediate_analysis(session, event)
-        
-        # Check if it's time for periodic incremental analysis
-        self._check_periodic_analysis()
         
         return finalized_session
-    
-    def _check_periodic_analysis(self):
-        """Check if it's time for periodic incremental analysis of all active sessions"""
-        # Skip if incremental analyzer is not configured
-        if not self.incremental_analyzer:
-            return
-            
-        current_time = time.time()
-        
-        # Check if enough time has passed since last analysis
-        if current_time - self.last_incremental_analysis >= self.incremental_interval:
-            # Run incremental analysis on all active sessions
-            results = self.incremental_analyzer.analyze_active_sessions(self.sessions)
-            
-            # Update statistics
-            self.stats['incremental_analyses'] += len(self.sessions)
-            self.stats['incremental_alerts'] += len(results)
-            
-            # Update last analysis time
-            self.last_incremental_analysis = current_time
-    
-    def _check_immediate_analysis(self, session, event, high_priority=False):
-        """Check if immediate incremental analysis should be performed
-        
-        Args:
-            session: Active session to potentially analyze
-            event: The event that triggered this check
-            high_priority: Whether this is a high-priority protocol (SSH, RDP, etc.)
-        """
-        # Skip if incremental analyzer is not configured
-        if not self.incremental_analyzer:
-            return
-            
-        # For high-priority protocols like SSH, we analyze on every event
-        if high_priority:
-            self._run_incremental_analysis_on_session(session)
-            return
-            
-        # For application-layer events, check heuristics
-        
-        # HTTP POST or suspicious methods
-        if isinstance(event, SuricataHTTP) and hasattr(event, 'method'):
-            if event.method in ['POST', 'PUT', 'DELETE'] or event.method not in ['GET', 'HEAD', 'OPTIONS']:
-                self._run_incremental_analysis_on_session(session)
-                return
-                
-        # DNS with suspicious patterns
-        if isinstance(event, SuricataDNS) and hasattr(event, 'query'):
-            query = event.query
-            # Check for suspicious DNS patterns (long queries, many subdomains, etc.)
-            if len(query) > 50 or query.count('.') > 4:
-                self._run_incremental_analysis_on_session(session)
-                return
-                
-        # TLS with unusual patterns
-        if isinstance(event, SuricataTLS):
-            # Always analyze TLS for critical services
-            self._run_incremental_analysis_on_session(session)
-            return
-            
-        # For other events, let the incremental analyzer decide based on its triggers
-        if self.incremental_analyzer.should_analyze_session(session):
-            self._run_incremental_analysis_on_session(session)
-            
-    # Update the _run_incremental_analysis_on_session method in SessionManager
-    def _run_incremental_analysis_on_session(self, session):
-        """Run incremental analysis on a single active session with improved critical service handling"""
-        if not self.incremental_analyzer:
-            return
-        
-        # Check if this is a critical service
-        is_critical = False
-        critical_port = None
-        
-        # Check port first
-        if hasattr(session, 'dport') and session.dport:
-            try:
-                port = int(session.dport)
-                if port in [22, 23, 21, 3389, 445, 139, 1433, 3306]:
-                    is_critical = True
-                    critical_port = port
-            except (ValueError, TypeError):
-                pass
-        
-        # Check protocol
-        if hasattr(session, 'appproto') and session.appproto:
-            app_proto = session.appproto.lower()
-            if app_proto in ['ssh', 'telnet', 'ftp', 'rdp', 'smb']:
-                is_critical = True
-        
-        # Extra logging for critical services
-        if is_critical:
-            logger.info(f"CRITICAL SERVICE: Analyzing {session.appproto or 'port '+str(critical_port)} flow {session.flow_id} from {session.saddr} to {session.daddr}")
-        
-        # Run the analysis
-        result = self.incremental_analyzer.analyze_session(session)
-        self.stats['incremental_analyses'] += 1
-        
-        # Log ML scores for debugging (critical services only)
-        if is_critical and result and 'ml_result' in result:
-            ml_result = result.get('ml_result', {})
-            logger.info(f"ML SCORES for {session.appproto or 'port '+str(critical_port)}: " +
-                    f"DT={ml_result.get('dt_confidence', 0):.2f}, " +
-                    f"RF={ml_result.get('rf_confidence', 0):.2f}, " +
-                    f"Combined={result.get('combined_score', 0):.2f}")
-        
-        if result and result.get('is_anomalous', False):
-            # Mark flow as critical for alerting priority
-            if is_critical:
-                result['is_critical_service'] = True
-            
-            self.stats['incremental_alerts'] += 1 
-        
-    def _check_immediate_analysis(self, session, event, high_priority=False):
-        """Check if immediate incremental analysis should be performed
-        
-        Args:
-            session: Active session to potentially analyze
-            event: The event that triggered this check
-            high_priority: Whether this is a high-priority protocol (SSH, RDP, etc.)
-        """
-        # Skip if incremental analyzer is not configured
-        if not self.incremental_analyzer:
-            return
-            
-        # For high-priority protocols like SSH, we analyze on every event
-        if high_priority:
-            logger.debug(f"Immediate analysis triggered for high-priority protocol: {session.appproto}")
-            self._run_incremental_analysis_on_session(session)
-            return
-        
-        # Check if this is a critical port (high-risk service)
-        is_critical_port = False
-        if hasattr(session, 'dport') and session.dport:
-            try:
-                port = int(session.dport)
-                # Check if this port is in the critical ports list
-                if hasattr(self.incremental_analyzer, 'config') and port in self.incremental_analyzer.config.critical_ports:
-                    logger.debug(f"Immediate analysis triggered for critical port: {port}")
-                    is_critical_port = True
-                    self._run_incremental_analysis_on_session(session)
-                    return
-            except (ValueError, TypeError):
-                pass
-        
-        # Check for critical application protocols (even if not flagged as high priority)
-        if hasattr(session, 'appproto') and session.appproto:
-            app_proto = session.appproto.lower()
-            if hasattr(self.incremental_analyzer, 'config') and app_proto in self.incremental_analyzer.config.critical_protocols:
-                logger.debug(f"Immediate analysis triggered for critical application protocol: {app_proto}")
-                self._run_incremental_analysis_on_session(session)
-                return
-            
-        # HTTP POST or suspicious methods - analyze immediately
-        if isinstance(event, SuricataHTTP) and hasattr(event, 'method'):
-            if event.method in ['POST', 'PUT', 'DELETE'] or event.method not in ['GET', 'HEAD', 'OPTIONS']:
-                logger.debug(f"Immediate analysis triggered for HTTP method: {event.method}")
-                self._run_incremental_analysis_on_session(session)
-                return
-            # Analyze any HTTP requests to sensitive paths (e.g., admin, login, api)
-            if hasattr(event, 'uri') and event.uri:
-                uri = event.uri.lower()
-                sensitive_paths = ['admin', 'login', 'wp-login', 'wp-admin', 'api', 'shell', 'config', 'console', 'manager']
-                if any(path in uri for path in sensitive_paths):
-                    logger.debug(f"Immediate analysis triggered for sensitive HTTP URI: {event.uri}")
-                    self._run_incremental_analysis_on_session(session)
-                    return
-                
-        # DNS with suspicious patterns - lowered thresholds for earlier detection
-        if isinstance(event, SuricataDNS) and hasattr(event, 'query'):
-            query = event.query
-            # Check for suspicious DNS patterns (long queries, many subdomains, etc.)
-            if len(query) > 30 or query.count('.') > 3:
-                logger.debug(f"Immediate analysis triggered for suspicious DNS query: {query}")
-                self._run_incremental_analysis_on_session(session)
-                return
-                
-        # TLS events - analyze immediately
-        if isinstance(event, SuricataTLS):
-            logger.debug(f"Immediate analysis triggered for TLS event")
-            self._run_incremental_analysis_on_session(session)
-            return
-        
-        # SSH events - always high priority
-        if isinstance(event, SuricataSSH):
-            logger.debug(f"Immediate analysis triggered for SSH event")
-            self._run_incremental_analysis_on_session(session)
-            return
-            
-        # For other events, let the incremental analyzer decide based on its triggers
-        if self.incremental_analyzer.should_analyze_session(session):
-            logger.debug(f"Analysis triggered by incremental analyzer for session {session.flow_id}")
-            self._run_incremental_analysis_on_session(session)
-    
     
     def get_session(self, flow_id: str) -> Optional[SuricataSession]:
         """Get session by flow_id"""

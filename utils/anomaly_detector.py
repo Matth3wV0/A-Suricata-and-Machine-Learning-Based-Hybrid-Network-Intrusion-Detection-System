@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+"""
+Enhanced Anomaly Detection Module for Hybrid NIDS - ROBUST FIXED VERSION
+"""
+
 import pandas as pd
 import numpy as np
 import json

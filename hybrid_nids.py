@@ -1,3 +1,19 @@
+#!/usr/bin/env python3
+"""
+Enhanced Hybrid NIDS with Session and Behavioral Awareness
+
+This script combines signature-based detection (Suricata) with session-aware and 
+behavioral anomaly detection to provide comprehensive network intrusion detection.
+
+Usage:
+    python hybrid_nids.py [--train <dataset_path>] 
+                          [--analyze <path_to_suricata_json>] 
+                          [--realtime <path_to_suricata_json>]
+                          [--model_dir <model_directory>]
+                          [--output <output_file>]
+                          [--telegram]
+"""
+
 import argparse
 import os
 import sys
@@ -23,7 +39,7 @@ from telethon import TelegramClient
 from suricata.suricata_parser import SuricataParser
 from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor 
 from utils.anomaly_detector import AnomalyDetector
-from telegram_module.telegram_alert import TelegramAlerter
+from utils.telegram_alert import TelegramAlerter
 from utils.service_whitelist import ServiceWhitelist
 # Import new modules
 from utils.session_manager import SessionManager, SuricataSession
@@ -63,12 +79,11 @@ class HybridNIDS:
     that combines signature-based detection with advanced anomaly detection capabilities.
     """
     
-    def __init__(self, model_dir='./model', telegram_enabled=False, incremental_analysis=True):
+    def __init__(self, model_dir='./model', telegram_enabled=False):
         """Initialize the Enhanced Hybrid NIDS."""
         self.model_dir = model_dir
         self.models = None
         self.telegram_enabled = telegram_enabled
-        self.incremental_analysis = incremental_analysis
         
         # Initialize TelegramAlerter if enabled
         # It will connect automatically in the background
@@ -87,6 +102,18 @@ class HybridNIDS:
         
         # Get current directory for session file
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Initialize new components
+        self.session_manager = SessionManager(
+            session_timeout=120,  # 2 minutes timeout for sessions
+            max_sessions=50000    # Maximum sessions to keep in memory
+        )
+        
+        self.behavioral_analyzer = BehavioralAnalyzer(
+            window_size=300,       # 5 minutes window for behavioral analysis
+            cleanup_interval=60,   # Cleanup every minute
+            max_tracked_ips=10000  # Maximum IPs to track
+        )
         
         # Ensure model directory exists
         os.makedirs(model_dir, exist_ok=True)
@@ -108,64 +135,6 @@ class HybridNIDS:
                 zero_byte_threshold=3,
                 save_results=True,
                 results_file="flow_results.csv"
-            )
-            
-            # Initialize incremental analyzer if enabled
-            if self.incremental_analysis:
-                from utils.incremental_analyzer import IncrementalAnalyzer, AnalysisTrigger
-                            
-                # Configure incremental analysis triggers with aggressive thresholds
-                analysis_config = AnalysisTrigger(
-                    time_interval=3.0,       # Check every 3 seconds (reduced from 10)
-                    packet_threshold=3,      # First check after 3 packets (reduced from 5)
-                    packet_increment=5,      # Then every 5 more packets (reduced from 10)
-                    byte_threshold=500,      # First check after 500B (reduced from 1KB)
-                    byte_increment=2000,     # Then every 2KB more (reduced from 5KB)
-                    use_time_trigger=True,
-                    use_packet_trigger=True,
-                    use_byte_trigger=True,
-                    # Per-port thresholds with very aggressive settings for critical services
-                    port_thresholds={
-                        22: (1, 100, 1.0),    # SSH - analyze after 1 packet, 100 bytes, or 1 second
-                        23: (1, 100, 1.0),    # Telnet - extremely aggressive
-                        21: (1, 200, 1.0),    # FTP - extremely aggressive
-                        3389: (2, 200, 1.0),  # RDP - very aggressive
-                        445: (2, 300, 2.0),   # SMB - aggressive
-                        139: (2, 300, 2.0),   # NetBIOS - aggressive
-                        1433: (2, 300, 2.0),  # MSSQL - aggressive
-                        3306: (2, 300, 2.0),  # MySQL - aggressive
-                        53: (2, 300, 2.0),    # DNS - aggressive
-                        80: (3, 500, 3.0),    # HTTP - moderately aggressive
-                        443: (3, 500, 3.0),   # HTTPS - moderately aggressive
-                    }
-                )
-                
-                # Create incremental analyzer
-                self.incremental_analyzer = IncrementalAnalyzer(
-                feature_extractor=self.feature_extractor,
-                anomaly_detector=self.anomaly_detector,
-                alert_callback=self.handle_alert,
-                config=analysis_config
-            )
-                self.incremental_interval = 1.0  # Check every 1 second (was 5.0)
-                logger.info("Incremental analysis enabled with real-time detection and aggressive thresholds for critical services")
-            else:
-                self.incremental_analyzer = None
-                logger.info("Incremental analysis disabled, using only finalized sessions")
-            
-            # Initialize behavioral analyzer
-            self.behavioral_analyzer = BehavioralAnalyzer(
-                window_size=300,       # 5 minutes window for behavioral analysis
-                cleanup_interval=60,   # Cleanup every minute
-                max_tracked_ips=10000  # Maximum IPs to track
-            )
-            
-            # Initialize session manager with incremental analysis support
-            self.session_manager = SessionManager(
-                session_timeout=120,            # 2 minutes timeout for sessions
-                max_sessions=50000,             # Maximum sessions to keep in memory
-                incremental_analyzer=self.incremental_analyzer, 
-                incremental_interval=5.0        # Run incremental analysis every 5 seconds
             )
             
         except Exception as e:
@@ -334,7 +303,7 @@ class HybridNIDS:
             for col in numeric_cols:
                 if df[col].isna().sum() > 0:
                     logger.info(f"Column {col} with NaN or infinite values.")
-                    df[col].fillna(df[col].median(), inplace=True)
+                    # df[col].fillna(df[col].median(), inplace=True)
         
         # Drop rows that still have NaN values
         df.dropna(inplace=True)
@@ -352,6 +321,23 @@ class HybridNIDS:
             df['Label'] = np.where((df['label'] == 'BENIGN') | (df['label'] == 'benign'), 0, 1)
             df.drop('label', axis=1, inplace=True)
         
+        # Identify and handle outliers
+        # This is a simple method - you might want to use more sophisticated approaches
+        # numeric_cols = df.select_dtypes(include=['float', 'int']).columns
+        # for col in numeric_cols:
+        #     Q1 = df[col].quantile(0.25)
+        #     Q3 = df[col].quantile(0.75)
+        #     IQR = Q3 - Q1
+            
+        #     extreme_upper = Q3 + 3 * IQR
+        #     extreme_lower = Q1 - 3 * IQR
+            
+        #     # Only remove extreme outliers
+        #     extreme_mask = (df[col] > extreme_upper) | (df[col] < extreme_lower)
+        #     if extreme_mask.sum() > 0 and extreme_mask.sum() < len(df) * 0.01:  # Don't remove more than 1%
+        #         logger.info(f"Capping extreme outliers in {col}: {extreme_mask.sum()} values")
+        #         df.loc[df[col] > extreme_upper, col] = extreme_upper
+        #         df.loc[df[col] < extreme_lower, col] = extreme_lower
         
         logger.info(f"Dataset loaded and preprocessed. Shape: {df.shape}")
         
@@ -531,7 +517,7 @@ class HybridNIDS:
             json.dump(baseline, f, indent=4)
         
         logger.info("Models and related files saved successfully.")
-        
+    
     def process_suricata_event(self, event):
         """
         Process a Suricata event and update session information.
@@ -544,59 +530,33 @@ class HybridNIDS:
         """
         if not event:
             return None
-            
-        # Record processing start time
-        event_processing_start = time.time()
-        
-        # Get timestamp from event if available
-        event_timestamp = None
-        if hasattr(event, 'timestamp'):
-            event_timestamp = event.timestamp
-        elif hasattr(event, 'starttime'):
-            event_timestamp = event.starttime
-
-        # Log event information first - this helps track the flow of events
-        if hasattr(event, 'uid') and hasattr(event, 'dport'):
-            try:
-                dport = int(event.dport) if event.dport else 0
-                # Extra logging for critical services
-                if dport in [22, 23, 21, 3389, 445, 139, 1433, 3306]:
-                    logger.info(f"CRITICAL SERVICE EVENT: flow={event.uid} port={dport} type={type(event).__name__}")
-            except (ValueError, TypeError):
-                pass
-        
         # Whitelist check for events
         try:
             # Skip processing for trusted internal devices like pfSense
             if hasattr(event, 'saddr') and event.saddr in self.service_whitelist.pfsense_interfaces:
                 return None
-                    
+                
             # Extract relevant information for whitelist checking
             if hasattr(event, 'daddr') and hasattr(event, 'dport') and hasattr(event, 'proto'):
                 try:
                     dport = int(event.dport) if event.dport else 0
                 except (ValueError, TypeError):
                     dport = 0
-                        
+                    
                 if dport > 0 and self.service_whitelist.is_whitelisted(event.daddr, dport, event.proto):
                     logger.debug(f"Skipping whitelisted service: {event.daddr}:{dport} ({event.proto})")
                     return None
+                
+                
         except Exception as e:
             logger.debug(f"Error in whitelist check: {e}")
-                
+            
+            
         # Process event through session manager
         finalized_session = self.session_manager.process_event(event)
         
-        # Calculate processing time
-        processing_time = time.time() - event_processing_start
-        
-        # If processing took more than 50ms, log it as this could be a bottleneck
-        if processing_time > 0.05:
-            logger.warning(f"Slow event processing: {processing_time:.3f}s for {type(event).__name__}")
-        
         # If session was finalized, process it
         if finalized_session:
-            finalize_start = time.time()
             # Run finalizer on the session
             result = self.flow_finalizer.process_session(finalized_session)
             
@@ -619,92 +579,19 @@ class HybridNIDS:
                     if not result.get('is_anomalous'):
                         self.handle_alert(result)
             
-            # Check if finalization took too long
-            finalize_time = time.time() - finalize_start
-            if finalize_time > 0.1:
-                logger.warning(f"Slow session finalization: {finalize_time:.3f}s for flow {finalized_session.flow_id}")
-            
             return result
         
         return None
         
-            
     def handle_alert(self, alert_data):
         """
-        Handle an alert generated by anomaly detection with prioritized Telegram alerts.
+        Handle an alert generated by anomaly detection.
         
         Args:
             alert_data: Dictionary with alert information
         """
         try:
-            # Get start time for alert handling
-            alert_start_time = time.time()
-            
-            # Check if this is from a critical service - prioritize Telegram for these
-            is_critical_service = alert_data.get('is_critical_service', False)
-            
-            if not is_critical_service:
-                try:
-                    port = int(alert_data.get('dst_port', 0))
-                    if port in [22, 23, 21, 3389, 445, 139, 1433, 3306]:
-                        is_critical_service = True
-                except (ValueError, TypeError):
-                    pass
-            
-            # Log alert right away for timestamping
-            logger.warning(f"ALERT: Flow {alert_data.get('flow_id', 'unknown')} from {alert_data.get('src_ip', 'unknown')}:{alert_data.get('src_port', 'unknown')} to {alert_data.get('dst_ip', 'unknown')}:{alert_data.get('dst_port', 'unknown')}")
-            
-            # Calculate detection latency if timestamps are available (if not already calculated)
-            flow_start_time = None
-            detection_latency = None
-            
-            if 'detection_latency' in alert_data:
-                detection_latency = alert_data['detection_latency']
-            elif 'session' in alert_data and alert_data['session'].get('starttime'):
-                try:
-                    start_time_str = alert_data['session'].get('starttime')
-                    from dateutil import parser
-                    import datetime
-                    start_time = parser.parse(start_time_str.replace('Z', '+00:00'))
-                    current_time = datetime.datetime.now(datetime.timezone.utc)
-                    detection_latency = (current_time - start_time).total_seconds()
-                    flow_start_time = start_time_str
-                except Exception as e:
-                    logger.warning(f"Failed to calculate detection latency: {e}")
-                    
-            # Log detection latency
-            if detection_latency is not None:
-                if detection_latency > 5.0:  # Warn about high latency
-                    logger.warning(f"HIGH DETECTION LATENCY: {detection_latency:.2f}s for flow {alert_data.get('flow_id', 'unknown')}")
-                else:
-                    logger.info(f"Detection latency: {detection_latency:.2f}s for flow {alert_data.get('flow_id', 'unknown')}")
-            
-            # Add latency to alert data if not already present
-            if detection_latency is not None and 'detection_latency' not in alert_data:
-                alert_data['detection_latency'] = detection_latency
-            
-            if flow_start_time is not None and 'start_time' not in alert_data:
-                alert_data['start_time'] = flow_start_time
-            
-            # PRIORITIZE TELEGRAM FOR CRITICAL SERVICES
-            # Send Telegram alert FIRST if this is a critical service
-            if is_critical_service and self.telegram_enabled and self.alerter:
-                try:
-                    # Format the alert message
-                    alert_message = self.alerter.format_anomaly_alert(alert_data)
-                    
-                    # Send immediate alert with ML scores
-                    logger.info(f"Sending IMMEDIATE Telegram alert for critical service: {alert_data.get('dst_port', 'unknown')}")
-                    result = self.alerter.send_message(alert_message)
-                    
-                    if result:
-                        logger.info("Telegram alert sent successfully")
-                    else:
-                        logger.warning("Failed to send Telegram alert")
-                except Exception as e:
-                    logger.error(f"Error sending Telegram alert: {e}")
-            
-            # Format alert message for other uses
+            # Format alert message
             alert_message = self.format_alert(alert_data)
             
             # Log to console
@@ -723,10 +610,10 @@ class HybridNIDS:
                         f.write(f"{ascii_message}\n\n")
                     logger.warning("Unicode characters were replaced in the alert message written to file")
             
-            # Send Telegram alert if enabled and not already sent
-            if not is_critical_service and self.telegram_enabled and self.alerter:
+            # Send Telegram alert if enabled
+            if self.telegram_enabled and self.alerter:
                 try:
-                    # Use the standard alert format for non-critical services
+                    # Let the alerter handle the message sending
                     result = self.alerter.send_message(alert_message)
                     if result:
                         logger.info("Telegram alert sent successfully")
@@ -734,11 +621,6 @@ class HybridNIDS:
                         logger.warning("Failed to send Telegram alert")
                 except Exception as e:
                     logger.error(f"Error sending Telegram alert: {e}")
-            
-            # Log alert handling time
-            alert_handling_time = time.time() - alert_start_time
-            if alert_handling_time > 0.1:  # More than 100ms is concerning
-                logger.warning(f"Slow alert handling: {alert_handling_time:.3f}s")
         
         except Exception as e:
             logger.error(f"Error handling alert: {e}")
@@ -769,56 +651,56 @@ class HybridNIDS:
                 message += f"App Protocol: {alert_data.get('app_proto', 'Unknown')}\n"
             
             # Add application layer details if available
-            if session.http_event_count > 0:
-                message += f"HTTP Events: {session.http_event_count}\n"
-                if session.http_methods:
-                    message += f"HTTP Methods: {', '.join(session.http_methods)}\n"
-                if session.http_status_codes:
-                    message += f"HTTP Status Codes: {', '.join(session.http_status_codes)}\n"
+            if session.get('http_event_count', 0) > 0:
+                message += f"HTTP Events: {session.get('http_event_count', 0)}\n"
+                if session.get('http_methods', []):
+                    message += f"HTTP Methods: {', '.join(session.get('http_methods', []))}\n"
+                if session.get('http_status_codes', []):
+                    message += f"HTTP Status Codes: {', '.join(session.get('http_status_codes', []))}\n"
             
-            if session.dns_event_count > 0:
-                message += f"DNS Events: {session.dns_event_count}\n"
-                if session.dns_queries:
-                    queries = session.dns_queries[:3]  # Show only first 3
+            if session.get('dns_event_count', 0) > 0:
+                message += f"DNS Events: {session.get('dns_event_count', 0)}\n"
+                if session.get('dns_queries', []):
+                    queries = session.get('dns_queries', [])[:3]  # Show only first 3
                     message += f"DNS Queries: {', '.join(queries)}\n"
             
-            if session.tls_event_count > 0:
-                message += f"TLS Events: {session.tls_event_count}\n"
-                if session.tls_sni:
-                    message += f"TLS SNI: {', '.join(session.tls_sni)}\n"
+            if session.get('tls_event_count', 0) > 0:
+                message += f"TLS Events: {session.get('tls_event_count', 0)}\n"
+                if session.get('tls_sni', []):
+                    message += f"TLS SNI: {', '.join(session.get('tls_sni', []))}\n"
             
             # Add flow timing information
-            if session.starttime:
-                message += f"Flow Start: {session.starttime}\n"
-            if session.endtime:
-                message += f"Flow End: {session.endtime}\n"
-            if session.duration:
-                message += f"Duration: {float(alert_data.duration):.3f} seconds\n"
+            if 'starttime' in session:
+                message += f"Flow Start: {session.get('starttime', 'Unknown')}\n"
+            if 'endtime' in session:
+                message += f"Flow End: {session.get('endtime', 'Unknown')}\n"
+            if 'duration' in alert_data:
+                message += f"Duration: {float(alert_data.get('duration', 0)):.3f} seconds\n"
             
             # Traffic volume stats
             message += "-" * 40 + "\n"
             message += "TRAFFIC STATISTICS:\n"
             
             try:
-                total_bytes = alert_data.total_bytes
-                total_packets = alert_data.total_packets
-                fwd_bytes = session.total_fwd_bytes
-                bwd_bytes = session.total_bwd_bytes
-                fwd_packets = session.total_fwd_packets
-                bwd_packets = session.total_bwd_packets
+                total_bytes = alert_data.get('total_bytes', 0)
+                total_packets = alert_data.get('total_packets', 0)
+                fwd_bytes = session.get('total_fwd_bytes', 0)
+                bwd_bytes = session.get('total_bwd_bytes', 0)
+                fwd_packets = session.get('total_fwd_packets', 0)
+                bwd_packets = session.get('total_bwd_packets', 0)
                 
-                message += f"Total Bytes: {total_bytes}\n"
-                message += f"  → Source→Dest: {fwd_bytes} bytes\n"
-                message += f"  → Dest→Source: {bwd_bytes} bytes\n"
-                message += f"Total Packets: {total_packets}\n"
-                message += f"  → Source→Dest: {fwd_packets} packets\n"
-                message += f"  → Dest→Source: {bwd_packets} packets\n"
+                message += f"Total Bytes: {total_bytes:,}\n"
+                message += f"  → Source→Dest: {fwd_bytes:,} bytes\n"
+                message += f"  → Dest→Source: {bwd_bytes:,} bytes\n"
+                message += f"Total Packets: {total_packets:,}\n"
+                message += f"  → Source→Dest: {fwd_packets:,} packets\n"
+                message += f"  → Dest→Source: {bwd_packets:,} packets\n"
             except Exception as e:
                 message += f"Error processing traffic statistics: {str(e)}\n"
             
             # Connection state
-            if session.state:
-                message += f"Connection State: {session.state}\n"
+            if 'state' in session:
+                message += f"Connection State: {session.get('state', '')}\n"
             
             # Anomaly detection results
             message += "-" * 40 + "\n"
@@ -903,30 +785,6 @@ class HybridNIDS:
                     message += f"     Bytes per second: {behavioral_features.get('bytes_sent_per_second', 0):.2f}\n"
                     message += f"     Packets per second: {behavioral_features.get('packets_sent_per_second', 0):.2f}\n"
             
-            
-            if alert_data.get('is_incremental', False):
-                message += "-" * 40 + "\n"
-                message += "INCREMENTAL DETECTION INFORMATION:\n"
-                
-                # Add detection latency information
-                if 'detection_latency' in alert_data and alert_data['detection_latency'] is not None:
-                    message += f"Detection Latency: {alert_data['detection_latency']:.2f} seconds\n"
-                
-                # Add trigger reason
-                if 'trigger_reason' in alert_data:
-                    message += f"Trigger Reason: {alert_data['trigger_reason']}\n"
-                
-                # Add analysis time
-                if 'analysis_duration' in alert_data:
-                    message += f"Analysis Time: {alert_data['analysis_duration']:.4f} seconds\n"
-                
-                # Add flow start time
-                if 'start_time' in alert_data and alert_data['start_time']:
-                    message += f"Flow Start Time: {alert_data['start_time']}\n"
-                
-                # Add incremental flag
-                message += "Detection Mode: Early Detection (active flow)\n"
-            
             message += "-" * 40 + "\n"
             
             # Add possible threat implications
@@ -999,16 +857,16 @@ class HybridNIDS:
         
         # Session information
         session = alert_data.get('session', {})
-        logger.info(f"Flow ID: {session.flow_id}")
+        logger.info(f"Flow ID: {session.get('flow_id', 'Unknown')}")
         logger.info(f"Duration: {alert_data.get('duration', 0):.3f} seconds")
         
         # App layer info
-        if session.http_event_count > 0:
-            logger.info(f"HTTP: {session.http_event_count} events")
-        if session.dns_event_count > 0:
-            logger.info(f"DNS: {session.dns_event_count} events")
-        if session.tls_event_count > 0:
-            logger.info(f"TLS: {session.tls_event_count} events")
+        if session.get('http_event_count', 0) > 0:
+            logger.info(f"HTTP: {session.get('http_event_count', 0)} events")
+        if session.get('dns_event_count', 0) > 0:
+            logger.info(f"DNS: {session.get('dns_event_count', 0)} events")
+        if session.get('tls_event_count', 0) > 0:
+            logger.info(f"TLS: {session.get('tls_event_count', 0)} events")
         
         # Traffic volume
         logger.info(f"Bytes: {alert_data.get('total_bytes', 0):,}, Packets: {alert_data.get('total_packets', 0):,}")
@@ -1139,9 +997,7 @@ class HybridNIDS:
                 logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
                 logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")
                 logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
-                
-    # Add this method to HybridNIDS to monitor real-time detection status
-
+            
     def monitor_suricata_file(self, file_path, output_file=None):
         """Monitor a Suricata JSON log file in real-time with session and behavior awareness."""
         logger.info(f"Monitoring Suricata JSON log file: {file_path}")
@@ -1158,21 +1014,10 @@ class HybridNIDS:
         processed_events = 0
         finalized_sessions = 0
         anomalies_detected = 0
-        incremental_analyses = 0
-        incremental_alerts = 0
         last_cleanup = time.time()
         last_stats_update = time.time()
-        last_incremental_check = time.time()
-        
-        # Detection latency tracking
-        detection_latencies = []
         
         try:
-            # Print initial status message
-            logger.info("NIDS REAL-TIME MONITORING ENABLED")
-            logger.info("Waiting for events...")
-            logger.info("Press Ctrl+C to stop monitoring")
-            
             while True:
                 # Check if file has grown
                 with open(file_path, 'r') as f:
@@ -1209,10 +1054,6 @@ class HybridNIDS:
                                     finalized_sessions += 1
                                     if result.get('is_anomalous', False):
                                         anomalies_detected += 1
-                                        
-                                        # Track detection latency
-                                        if 'detection_latency' in result:
-                                            detection_latencies.append(result['detection_latency'])
                             
                             except json.JSONDecodeError:
                                 continue
@@ -1223,48 +1064,9 @@ class HybridNIDS:
                         # Update position
                         position = end_position
                 
-                # Current time for periodic tasks
-                current_time = time.time()
-                
-                # Force incremental analysis of active sessions frequently
-                if self.incremental_analysis and current_time - last_incremental_check > 1.0:  # Every 1 second
-                    # Run incremental analysis directly on active sessions
-                    if hasattr(self, 'incremental_analyzer') and self.incremental_analyzer:
-                        # Focus on critical services first
-                        critical_sessions = {}
-                        normal_sessions = {}
-                        
-                        for flow_id, session in self.session_manager.sessions.items():
-                            is_critical = False
-                            try:
-                                if hasattr(session, 'dport'):
-                                    dport = int(session.dport) if session.dport else 0
-                                    if dport in [22, 23, 21, 3389, 445, 139, 1433, 3306]:
-                                        is_critical = True
-                            except (ValueError, TypeError):
-                                pass
-                                
-                            if is_critical:
-                                critical_sessions[flow_id] = session
-                            else:
-                                normal_sessions[flow_id] = session
-                        
-                        # Analyze critical sessions first
-                        if critical_sessions:
-                            critical_results = self.incremental_analyzer.analyze_active_sessions(critical_sessions)
-                            incremental_analyses += len(critical_sessions)
-                            incremental_alerts += len(critical_results)
-                        
-                        # Then regular sessions
-                        if normal_sessions:
-                            normal_results = self.incremental_analyzer.analyze_active_sessions(normal_sessions)
-                            incremental_analyses += len(normal_sessions)
-                            incremental_alerts += len(normal_results)
-                    
-                    last_incremental_check = current_time
-                
                 # Check if cleanup is needed
-                if current_time - last_cleanup > 30:  # Cleanup every 30 seconds (reduced from 60)
+                current_time = time.time()
+                if current_time - last_cleanup > 60:  # Cleanup every minute
                     # Clean up expired sessions
                     expired_sessions = self.session_manager.cleanup_expired_sessions()
                     
@@ -1272,7 +1074,7 @@ class HybridNIDS:
                     for session in expired_sessions:
                         result = self.flow_finalizer.process_session(session)
                         finalized_sessions += 1
-                        if result and result.get('is_anomalous', False):
+                        if result.get('is_anomalous', False):
                             anomalies_detected += 1
                     
                     # Clean up behavioral analyzer
@@ -1280,62 +1082,23 @@ class HybridNIDS:
                     
                     last_cleanup = current_time
                 
-                # Print status update every 10 seconds
-                if current_time - last_stats_update > 10:
+                # Print status update every minute
+                if current_time - last_stats_update > 60:
                     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    # Calculate average detection latency
-                    avg_latency = sum(detection_latencies) / max(len(detection_latencies), 1)
-                    max_latency = max(detection_latencies) if detection_latencies else 0
-                    
-                    # Print status dashboard
-                    print("\n" + "=" * 80)
-                    print(f"NIDS STATUS UPDATE ({now})")
-                    print("=" * 80)
-                    print(f"Processed events: {processed_events} | Active sessions: {len(self.session_manager.sessions)}")
-                    print(f"Finalized sessions: {finalized_sessions} | Alerts: {anomalies_detected}")
-                    print(f"Incremental analyses: {incremental_analyses} | Incremental alerts: {incremental_alerts}")
-                    print(f"Average detection latency: {avg_latency:.2f}s | Max latency: {max_latency:.2f}s")
-                    
-                    # Reset latency tracking every period
-                    detection_latencies = []
-                    
-                    # Get current stats from incremental analyzer
-                    if hasattr(self, 'incremental_analyzer') and self.incremental_analyzer:
-                        inc_stats = self.incremental_analyzer.get_stats()
-                        print(f"Active tracked flows: {inc_stats.get('active_tracked_flows', 0)} | "
-                            f"Alerted flows: {inc_stats.get('alerted_flows', 0)}")
+                    logger.info(f"[{now}] Processed: {processed_events} | Sessions: {finalized_sessions} | Alerts: {anomalies_detected}")
                     
                     # Check for suspicious IPs based on behavioral analysis
                     top_anomalous = self.behavioral_analyzer.get_top_anomalous_ips(5)
                     if top_anomalous:
-                        print("\nTop suspicious IPs from behavioral analysis:")
+                        logger.info("Top suspicious IPs from behavioral analysis:")
                         for ip, score in top_anomalous:
-                            if score > 0.5:  # Lowered threshold to show more IPs
-                                print(f"  - {ip}: Score {score:.2f}")
-                    
-                    # Critical services status
-                    critical_flows = []
-                    for flow_id, session in self.session_manager.sessions.items():
-                        try:
-                            if hasattr(session, 'dport'):
-                                dport = int(session.dport) if session.dport else 0
-                                if dport in [22, 23, 21, 3389, 445, 139, 1433, 3306]:
-                                    critical_flows.append((flow_id, session.saddr, session.daddr, dport))
-                        except (ValueError, TypeError):
-                            pass
-                    
-                    if critical_flows:
-                        print("\nActive Critical Service Flows:")
-                        for flow_id, src, dst, port in critical_flows[:5]:  # Show only first 5
-                            print(f"  - {src} → {dst}:{port}")
-                    
-                    print("=" * 80)
+                            if score > 0.7:  # Only show highly suspicious IPs
+                                logger.info(f"  - {ip}: Score {score:.2f}")
                     
                     last_stats_update = current_time
                 
-                # Sleep for a short time to reduce CPU usage
-                time.sleep(0.1)
+                # Sleep for a second
+                time.sleep(1)
         
         except KeyboardInterrupt:
             # Print summary when stopped
@@ -1345,13 +1108,11 @@ class HybridNIDS:
             logger.info(f"Processed events: {processed_events}")
             logger.info(f"Finalized sessions: {finalized_sessions}")
             logger.info(f"Anomalies detected: {anomalies_detected}")
-            logger.info(f"Incremental analyses: {incremental_analyses}")
-            logger.info(f"Incremental alerts: {incremental_alerts}")
             logger.info(f"Session Manager stats: {self.session_manager.get_stats()}")
             logger.info(f"Behavioral Analyzer stats: {self.behavioral_analyzer.get_stats()}")
             logger.info(f"Flow Finalizer stats: {self.flow_finalizer.get_stats()}")
 
-    
+
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description='Enhanced Hybrid NIDS with Session and Behavioral Awareness')

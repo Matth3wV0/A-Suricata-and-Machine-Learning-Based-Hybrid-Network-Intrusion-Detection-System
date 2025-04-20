@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Flow Finalizer Module for Hybrid NIDS
+Handles the finalization and analysis of completed flow sessions
+"""
+
 import time
 import logging
 import pandas as pd

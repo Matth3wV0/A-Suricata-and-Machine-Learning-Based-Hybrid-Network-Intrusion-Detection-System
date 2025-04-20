@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Service Whitelist for Hybrid NIDS
+Provides a whitelist of legitimate services to prevent false positives
+"""
+
 import logging
 import socket
 from typing import List, Dict, Tuple, Set, Optional
