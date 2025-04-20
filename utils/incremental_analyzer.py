@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Incremental Flow Analysis Module for Hybrid NIDS
-Enables real-time analysis of active flows without waiting for session finalization
-"""
-
 import time
 import logging
 import pandas as pd
@@ -185,9 +179,10 @@ class IncrementalAnalyzer:
 
 
 
+    # Replace the analyze_session method in IncrementalAnalyzer class
     def analyze_session(self, session) -> Optional[Dict[str, Any]]:
         """
-        Analyze a session incrementally
+        Analyze a session incrementally with forced alerts for critical services
         
         Args:
             session: The SuricataSession to analyze
@@ -198,8 +193,27 @@ class IncrementalAnalyzer:
         try:
             flow_id = session.flow_id
             analysis_start_time = time.time()
-            logger.info(f"Starting incremental analysis for flow {flow_id} - src={session.saddr}:{session.sport} dst={session.daddr}:{session.dport} proto={session.proto}")
-
+            
+            # Check if this is a critical service that needs special handling
+            is_critical_service = False
+            critical_port = None
+            
+            if hasattr(session, 'dport') and session.dport:
+                try:
+                    port = int(session.dport)
+                    if port in [22, 23, 21, 3389, 445, 139, 1433, 3306]:
+                        is_critical_service = True
+                        critical_port = port
+                        logger.info(f"Analyzing critical service: Port {port}")
+                except (ValueError, TypeError):
+                    pass
+            
+            # Check protocol
+            if hasattr(session, 'appproto') and session.appproto:
+                app_proto = session.appproto.lower()
+                if app_proto in ['ssh', 'telnet', 'ftp', 'rdp', 'smb']:
+                    is_critical_service = True
+                    logger.info(f"Analyzing critical protocol: {app_proto}")
             
             # Calculate detection latency if starttime is available
             detection_latency = None
@@ -238,10 +252,51 @@ class IncrementalAnalyzer:
             # Calculate analysis time
             analysis_duration = time.time() - analysis_start_time
             
-            # Check for anomaly and generate alert if needed
-            is_anomalous = (ml_result.get('is_anomalous', False) or 
-                        stat_result.get('is_anomalous', False) or
-                        combined_score > 0.7)
+            # Special handing for SSH (critical service)
+            # Lower threshold for SSH - alert at 0.5 combined score instead of 0.7
+            ssh_threshold = 0.5
+            telnet_threshold = 0.5
+            
+            # Determine if anomalous based on ML and statistical results
+            is_normal_anomalous = (ml_result.get('is_anomalous', False) or 
+                                stat_result.get('is_anomalous', False) or
+                                combined_score > 0.7)
+            
+            # For critical services, use lower threshold
+            is_ssh_anomalous = False
+            is_telnet_anomalous = False
+            is_critical_anomalous = False
+            
+            if is_critical_service:
+                if hasattr(session, 'appproto') and session.appproto and session.appproto.lower() == 'ssh':
+                    is_ssh_anomalous = combined_score > ssh_threshold
+                    if is_ssh_anomalous:
+                        logger.info(f"SSH attack detected with score {combined_score:.2f} > {ssh_threshold}")
+                elif hasattr(session, 'dport') and session.dport == "23":
+                    is_telnet_anomalous = combined_score > telnet_threshold
+                    if is_telnet_anomalous:
+                        logger.info(f"Telnet attack detected with score {combined_score:.2f} > {telnet_threshold}")
+                elif critical_port is not None:
+                    # Other critical services
+                    is_critical_anomalous = combined_score > 0.6  # Lower threshold than regular traffic
+                    if is_critical_anomalous:
+                        logger.info(f"Critical service (port {critical_port}) attack detected with score {combined_score:.2f}")
+            
+            # Combined decision considering all criteria
+            is_anomalous = is_normal_anomalous or is_ssh_anomalous or is_telnet_anomalous or is_critical_anomalous
+            
+            # FOR DEBUGGING: Log ML scores for critical services regardless of detection
+            if is_critical_service:
+                dt_score = ml_result.get('dt_confidence', 0) if 'dt_confidence' in ml_result else 0
+                rf_score = ml_result.get('rf_confidence', 0) if 'rf_confidence' in ml_result else 0
+                xgb_score = ml_result.get('xgb_confidence', 0) if 'xgb_confidence' in ml_result else 0
+                
+                logger.info(f"CRITICAL SERVICE ML SCORES - Flow {flow_id}")
+                logger.info(f"  Decision Tree: {dt_score:.4f}")
+                logger.info(f"  Random Forest: {rf_score:.4f}")
+                logger.info(f"  XGBoost: {xgb_score:.4f}")
+                logger.info(f"  Combined Score: {combined_score:.4f}")
+                logger.info(f"  Anomalous: {is_anomalous}")
             
             if is_anomalous:
                 # Mark flow as alerted
@@ -256,12 +311,7 @@ class IncrementalAnalyzer:
                     except (ValueError, TypeError):
                         port = session.dport
                 
-                # Check if this is a critical service for priority alerting
-                is_critical_service = False
-                if port in self.config.critical_ports:
-                    is_critical_service = True
-                
-                # Construct result with more ML details
+                # Construct result
                 result = {
                     'flow_id': flow_id,
                     'timestamp': time.time(),
@@ -279,12 +329,12 @@ class IncrementalAnalyzer:
                     'combined_score': combined_score,
                     'is_anomalous': True,
                     'is_incremental': True,  # Flag to indicate this was from incremental analysis
-                    'is_critical_service': is_critical_service,  # Flag for critical services
-                    'detection_latency': detection_latency,  # Add detection latency information
-                    'analysis_duration': analysis_duration,  # Time taken to analyze
-                    'trigger_reason': trigger_reason,  # Why this analysis was triggered
-                    'start_time': start_time_str,  # Flow start time for reference
-                    'session': session  # Include full session for reference
+                    'is_critical_service': is_critical_service,  # Flag for prioritizing alerts
+                    'detection_latency': detection_latency,
+                    'analysis_duration': analysis_duration,
+                    'trigger_reason': trigger_reason,
+                    'start_time': start_time_str,
+                    'session': session
                 }
                 
                 # Log detection details
@@ -301,25 +351,63 @@ class IncrementalAnalyzer:
                 logger.info(f"  ML Score: {ml_result.get('score', 0):.4f}, Statistical Score: {stat_result.get('score', 0):.4f}")
                 logger.info(f"  Combined Score: {combined_score:.4f}")
                 
-                # Generate alert with priority for Telegram
+                # Generate alert immediately
                 if self.alert_callback:
-                    logger.info("Sending immediate alert notification")
-                    self.alert_callback(result)
-                
-                
-                # And near the end of the method, after analyzing and before returning:
-                analysis_duration = time.time() - analysis_start_time
-                if is_anomalous:
-                    logger.info(f"ANOMALY DETECTED in {analysis_duration:.3f}s - flow {flow_id} score={combined_score:.4f}")
+                    logger.info(f"Sending immediate alert notification for flow {flow_id}")
+                    try:
+                        self.alert_callback(result)
+                        logger.info(f"Alert callback successfully called for flow {flow_id}")
+                    except Exception as e:
+                        logger.error(f"Error in alert callback: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
                 else:
-                    logger.debug(f"No anomaly detected in {analysis_duration:.3f}s - flow {flow_id} score={combined_score:.4f}")
-
-                # Warn about slow analysis
-                if analysis_duration > 0.1:  # More than 100ms is concerning
-                    logger.warning(f"Slow analysis detected: {analysis_duration:.3f}s for flow {flow_id}")
+                    logger.error("Alert callback is not configured!")
                 
-
                 return result
+            
+            # FORCE ALERTS FOR SSH TRAFFIC REGARDLESS OF SCORES
+            # This is for debugging - will send alerts even if ML scores are low
+            elif is_critical_service and hasattr(session, 'appproto') and session.appproto and session.appproto.lower() == 'ssh':
+                # Force alerts for SSH traffic to debug
+                logger.info(f"FORCING ALERT FOR SSH TRAFFIC - Flow {flow_id}")
+                logger.info(f"ML Scores - DT: {ml_result.get('dt_confidence', 0):.2f}, RF: {ml_result.get('rf_confidence', 0):.2f}")
+                
+                # Construct debug result
+                result = {
+                    'flow_id': flow_id,
+                    'timestamp': time.time(),
+                    'src_ip': session.saddr,
+                    'src_port': session.sport,
+                    'dst_ip': session.daddr,
+                    'dst_port': session.dport,
+                    'proto': session.proto,
+                    'app_proto': session.appproto,
+                    'duration': 0,
+                    'total_bytes': session.total_fwd_bytes + session.total_bwd_bytes,
+                    'total_packets': session.total_fwd_packets + session.total_bwd_packets,
+                    'ml_result': ml_result,
+                    'stat_result': stat_result,
+                    'combined_score': combined_score,
+                    'is_anomalous': True,  # Force to true for testing
+                    'is_incremental': True,
+                    'is_critical_service': True,
+                    'is_debug_alert': True,  # Flag as debug alert
+                    'detection_latency': detection_latency,
+                    'start_time': start_time_str,
+                    'session': session
+                }
+                
+                # Send debug alert
+                if self.alert_callback:
+                    logger.info("Sending debug SSH alert")
+                    try:
+                        self.alert_callback(result)
+                        logger.info("SSH debug alert sent successfully")
+                    except Exception as e:
+                        logger.error(f"Error sending debug alert: {e}")
+                
+                return None  # Don't return as a normal detection
             
             return None
             
@@ -328,7 +416,6 @@ class IncrementalAnalyzer:
             import traceback
             logger.error(traceback.format_exc())
             return None
-
     
     def _determine_trigger_reason(self, session) -> str:
         """Determine the reason why this session was analyzed"""

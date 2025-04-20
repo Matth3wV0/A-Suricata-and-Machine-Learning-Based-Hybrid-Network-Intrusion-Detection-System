@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""
-Enhanced Hybrid NIDS with Session and Behavioral Awareness
-
-This script combines signature-based detection (Suricata) with session-aware and 
-behavioral anomaly detection to provide comprehensive network intrusion detection.
-
-Usage:
-    python hybrid_nids.py [--train <dataset_path>] 
-                          [--analyze <path_to_suricata_json>] 
-                          [--realtime <path_to_suricata_json>]
-                          [--model_dir <model_directory>]
-                          [--output <output_file>]
-                          [--telegram]
-"""
-
 import argparse
 import os
 import sys
@@ -39,7 +23,7 @@ from telethon import TelegramClient
 from suricata.suricata_parser import SuricataParser
 from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor 
 from utils.anomaly_detector import AnomalyDetector
-from utils.telegram_alert import TelegramAlerter
+from telegram.telegram_alert import TelegramAlerter
 from utils.service_whitelist import ServiceWhitelist
 # Import new modules
 from utils.session_manager import SessionManager, SuricataSession

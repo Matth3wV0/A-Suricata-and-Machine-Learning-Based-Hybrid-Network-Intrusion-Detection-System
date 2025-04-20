@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Session Manager Module for Hybrid NIDS
-Aggregates Suricata events by flow_id and maintains session state
-"""
-
 import time
 import logging
 import datetime

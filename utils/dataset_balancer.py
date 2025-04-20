@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-Enhanced Dataset Balancing for Hybrid NIDS
-This module adds advanced dataset balancing techniques to the hybrid NIDS system
-to address class imbalance issues and improve model performance.
-"""
-
 import numpy as np
 import pandas as pd
 import logging

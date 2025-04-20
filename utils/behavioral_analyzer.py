@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Behavioral Analyzer Module for Hybrid NIDS
-Tracks and analyzes network behavior per source IP
-"""
-
 import time
 import logging
 import datetime
