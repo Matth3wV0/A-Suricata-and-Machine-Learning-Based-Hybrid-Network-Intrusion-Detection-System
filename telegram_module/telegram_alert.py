@@ -1,15 +1,8 @@
-#!/usr/bin/env python3
-"""
-Telegram Alert Module with Chat ID Testing
-Tests different formats for chat IDs to find one that works
-"""
-
 import os
 import asyncio
 import logging
 import datetime
 import threading
-import time
 from threading import Event
 from dotenv import load_dotenv
 from telethon import TelegramClient, utils

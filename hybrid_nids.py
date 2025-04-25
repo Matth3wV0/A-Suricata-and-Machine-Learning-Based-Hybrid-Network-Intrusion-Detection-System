@@ -18,35 +18,29 @@ import argparse
 import os
 import sys
 import json
-import asyncio
 import time
 import datetime
 import pickle
 import logging
 import pandas as pd
 import numpy as np
-from dataclasses import asdict
 from dotenv import load_dotenv
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report
 from xgboost import XGBClassifier
-from utils.dataset_balancer import DatasetBalancer, integrate_binary_balancing, integrate_multiclass_balancing
-from telethon import TelegramClient
-# Import custom modules
+from utils.dataset_balancer import integrate_binary_balancing
 from suricata.suricata_parser import SuricataParser
-from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor 
-from utils.anomaly_detector import AnomalyDetector
 from telegram_module.telegram_alert import TelegramAlerter
-from utils.service_whitelist import ServiceWhitelist
-# Import new modules
-from utils.session_manager import SessionManager, SuricataSession
+from utils.session_manager import SessionManager
 from utils.behavioral_analyzer import BehavioralAnalyzer
 from utils.flow_finalizer import FlowFinalizer
+from utils.adaptive_flow_features import AdaptiveFlowFeatureExtractor 
+from utils.anomaly_detector import AnomalyDetector
+from utils.service_whitelist import ServiceWhitelist
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -57,7 +51,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger('hybrid-nids')
 
-# Load environment variables from .env file
 load_dotenv()
 
 # List of features to use based on matching table
@@ -84,9 +77,6 @@ class HybridNIDS:
         self.model_dir = model_dir
         self.models = None
         self.telegram_enabled = telegram_enabled
-        
-        # Initialize TelegramAlerter if enabled
-        # It will connect automatically in the background
         self.alerter = None
         if telegram_enabled:
             try:
@@ -118,7 +108,6 @@ class HybridNIDS:
         # Ensure model directory exists
         os.makedirs(model_dir, exist_ok=True)
         
-        # Try to load models if they exist
         try:
             self.load_models()
             logger.info("Models loaded successfully.")
@@ -147,31 +136,22 @@ class HybridNIDS:
         
         result = {}
         
-        # Load Decision Tree model
         with open(os.path.join(self.model_dir, 'dt_model.pkl'), 'rb') as f:
             result['dt_model'] = pickle.load(f)
         
-        # Load Random Forest model
         with open(os.path.join(self.model_dir, 'rf_model.pkl'), 'rb') as f:
             result['rf_model'] = pickle.load(f)
             
-        # Try to load XGBoost model if available
-        try:
-            with open(os.path.join(self.model_dir, 'xgb_model.pkl'), 'rb') as f:
-                result['xgb_model'] = pickle.load(f)
-            logger.info("XGBoost model loaded successfully.")
-            
-            # Load label encoder for XGBoost
-            with open(os.path.join(self.model_dir, 'label_encoder.pkl'), 'rb') as f:
-                result['label_encoder'] = pickle.load(f)
-        except FileNotFoundError:
-            logger.warning("XGBoost model not found. Will use DT and RF only.")
+        with open(os.path.join(self.model_dir, 'xgb_model.pkl'), 'rb') as f:
+            result['xgb_model'] = pickle.load(f)
+        logger.info("XGBoost model loaded successfully.")
         
-        # Load scaler
+        with open(os.path.join(self.model_dir, 'label_encoder.pkl'), 'rb') as f:
+            result['label_encoder'] = pickle.load(f)
+        
         with open(os.path.join(self.model_dir, 'scaler.pkl'), 'rb') as f:
             result['scaler'] = pickle.load(f)
         
-        # Load baseline statistics
         with open(os.path.join(self.model_dir, 'baseline.json'), 'r') as f:
             result['baseline'] = json.load(f)
         
@@ -183,7 +163,6 @@ class HybridNIDS:
         """Train the machine learning models using CICIDS2017 dataset with balanced data."""
         logger.info(f"Training models using dataset: {dataset_path}")
         
-        # Load and preprocess dataset
         df = self._load_and_preprocess_dataset(dataset_path)
         
         # First verify the original distribution
@@ -197,47 +176,35 @@ class HybridNIDS:
         balanced_df = integrate_binary_balancing(df, target_col='Label', benign_value=0)
         logger.info(f"Balanced dataset shape: {balanced_df.shape}")
         
-        # Prepare features and target from balanced dataset
         X, y = self._prepare_features_target(balanced_df)
         
-        # Split data for training and testing
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.25, random_state=42, stratify=y
         )
         
-        # Verify the balanced data distribution
         self._verify_labels(y_train, is_balanced=True)
         
-        # Scale features
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        # Convert back to DataFrame for feature names
         X_train_scaled_df = pd.DataFrame(X_train_scaled, columns=X_train.columns)
         X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=X_test.columns)
         
-        # Create label encoder for XGBoost
         le = LabelEncoder()
         y_train_encoded = le.fit_transform(y_train)
         y_test_encoded = le.transform(y_test)
         
-        # Train Decision Tree
         dt_model = self._train_decision_tree(X_train_scaled_df, y_train, X_test_scaled_df, y_test)
         
-        # Train Random Forest
         rf_model = self._train_random_forest(X_train_scaled_df, y_train, X_test_scaled_df, y_test)
         
-        # Train XGBoost
         xgb_model = self._train_xgboost(X_train_scaled_df, y_train_encoded, X_test_scaled_df, y_test_encoded, le)
         
-        # Create baseline statistics
         baseline = self._create_baseline(X_train_scaled_df[y_train == 0])
         
-        # Save models and related files
         self._save_models(dt_model, rf_model, xgb_model, scaler, le, baseline)
         
-        # Load models
         self.load_models()
         
         logger.info("Training completed successfully.")
@@ -274,9 +241,7 @@ class HybridNIDS:
         """
         logger.info("Loading and preprocessing dataset...")
         
-        # Load dataset
         if os.path.isdir(dataset_path):
-            # Load from directory (multiple CSV files)
             df = pd.DataFrame()
             for dirname, _, filenames in os.walk(dataset_path):
                 for filename in filenames:
@@ -303,7 +268,7 @@ class HybridNIDS:
             for col in numeric_cols:
                 if df[col].isna().sum() > 0:
                     logger.info(f"Column {col} with NaN or infinite values.")
-                    # df[col].fillna(df[col].median(), inplace=True)
+                    df[col].fillna(df[col].median(), inplace=True)
         
         # Drop rows that still have NaN values
         df.dropna(inplace=True)
@@ -320,24 +285,6 @@ class HybridNIDS:
         elif 'label' in df.columns:
             df['Label'] = np.where((df['label'] == 'BENIGN') | (df['label'] == 'benign'), 0, 1)
             df.drop('label', axis=1, inplace=True)
-        
-        # Identify and handle outliers
-        # This is a simple method - you might want to use more sophisticated approaches
-        # numeric_cols = df.select_dtypes(include=['float', 'int']).columns
-        # for col in numeric_cols:
-        #     Q1 = df[col].quantile(0.25)
-        #     Q3 = df[col].quantile(0.75)
-        #     IQR = Q3 - Q1
-            
-        #     extreme_upper = Q3 + 3 * IQR
-        #     extreme_lower = Q1 - 3 * IQR
-            
-        #     # Only remove extreme outliers
-        #     extreme_mask = (df[col] > extreme_upper) | (df[col] < extreme_lower)
-        #     if extreme_mask.sum() > 0 and extreme_mask.sum() < len(df) * 0.01:  # Don't remove more than 1%
-        #         logger.info(f"Capping extreme outliers in {col}: {extreme_mask.sum()} values")
-        #         df.loc[df[col] > extreme_upper, col] = extreme_upper
-        #         df.loc[df[col] < extreme_lower, col] = extreme_lower
         
         logger.info(f"Dataset loaded and preprocessed. Shape: {df.shape}")
         
@@ -489,30 +436,24 @@ class HybridNIDS:
         """Save trained models and related files."""
         logger.info(f"Saving models to {self.model_dir}...")
         
-        # Save models
         with open(os.path.join(self.model_dir, 'dt_model.pkl'), 'wb') as f:
             pickle.dump(dt_model, f)
         
         with open(os.path.join(self.model_dir, 'rf_model.pkl'), 'wb') as f:
             pickle.dump(rf_model, f)
         
-        # Save XGBoost model
         with open(os.path.join(self.model_dir, 'xgb_model.pkl'), 'wb') as f:
             pickle.dump(xgb_model, f)
         
-        # Save label encoder for XGBoost
         with open(os.path.join(self.model_dir, 'label_encoder.pkl'), 'wb') as f:
             pickle.dump(label_encoder, f)
         
-        # Save scaler
         with open(os.path.join(self.model_dir, 'scaler.pkl'), 'wb') as f:
             pickle.dump(scaler, f)
         
-        # Save feature list
         with open(os.path.join(self.model_dir, 'features.json'), 'w') as f:
             json.dump(ALIGNED_FEATURES, f)
         
-        # Save baseline
         with open(os.path.join(self.model_dir, 'baseline.json'), 'w') as f:
             json.dump(baseline, f, indent=4)
         
@@ -530,7 +471,6 @@ class HybridNIDS:
         """
         if not event:
             return None
-        # Whitelist check for events
         try:
             # Skip processing for trusted internal devices like pfSense
             if hasattr(event, 'saddr') and event.saddr in self.service_whitelist.pfsense_interfaces:
@@ -591,10 +531,8 @@ class HybridNIDS:
             alert_data: Dictionary with alert information
         """
         try:
-            # Format alert message
             alert_message = self.format_alert(alert_data)
             
-            # Log to console
             self._log_alert(alert_data)
             
             # Send to output file if specified
@@ -1143,7 +1081,6 @@ def main():
     """Main function."""
     args = parse_args()
     
-    # Initialize Hybrid NIDS
     nids = HybridNIDS(model_dir=args.model_dir, telegram_enabled=args.telegram)
     
     # Execute the selected action
@@ -1154,8 +1091,6 @@ def main():
     elif args.realtime:
         nids.monitor_suricata_file(args.realtime, args.output)
     
-    # No need to explicitly disconnect the Telegram client
-    # The daemon thread will be terminated when the main program exits
     logger.info("NIDS execution completed")
 
 

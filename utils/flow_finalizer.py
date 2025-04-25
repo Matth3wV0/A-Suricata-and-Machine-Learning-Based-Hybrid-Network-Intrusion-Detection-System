@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Flow Finalizer Module for Hybrid NIDS
-Handles the finalization and analysis of completed flow sessions
-"""
-
 import time
 import logging
 import pandas as pd
@@ -103,21 +97,16 @@ class FlowFinalizer:
         # Add application-layer features if available
         if hasattr(session, 'get_app_layer_info'):
             app_features = session.get_app_layer_info()
-            # Convert app features to DataFrame
             app_features_df = pd.DataFrame([app_features])
-            # Combine with base features
             features = pd.concat([base_features, app_features_df], axis=1)
         else:
             features = base_features
         
-        # Run anomaly detection
         ml_result, stat_result, combined_score = self.anomaly_detector.detect_anomalies(features)
         
-        # Determine if anomalous
         is_anomalous = (ml_result.get('is_anomalous', False) or
                         stat_result.get('is_anomalous', False))
         
-        # Construct result
         result = {
             'flow_id': session_dict.get('flow_id', ''),
             'timestamp': time.time(),
@@ -138,18 +127,15 @@ class FlowFinalizer:
             'session': session_dict  # Include full session for reference
         }
         
-        # Generate alert if anomalous
         if is_anomalous:
             self.stats['anomalous_sessions'] += 1
             if self.alert_callback:
                 self.alert_callback(result)
                 self.stats['alerts_generated'] += 1
         
-        # Save results if enabled
         if self.save_results:
             self._save_result(result)
         
-        # Cleanup periodically
         current_time = time.time()
         if current_time - self.last_cleanup > 300:  # 5 minutes
             self._cleanup_old_data()

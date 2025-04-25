@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Dataclasses for different Suricata flow types 
-"""
-
 from dataclasses import dataclass
 from typing import Union, List, Dict
 

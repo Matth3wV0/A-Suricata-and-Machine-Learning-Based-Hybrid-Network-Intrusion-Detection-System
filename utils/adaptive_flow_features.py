@@ -1,12 +1,4 @@
-#!/usr/bin/env python3
-"""
-Adaptive Feature Extraction from Suricata Flows and Sessions
-This version supports both standard Suricata flows and enriched sessions
-"""
-
 import pandas as pd
-import numpy as np
-import json
 import logging
 from dataclasses import asdict
 from typing import Dict, List, Any, Union, Optional

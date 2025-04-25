@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Suricata JSON parser for extracting flow information
-"""
-
 import json
 import datetime
 from typing import Dict, Any, Union

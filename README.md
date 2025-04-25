@@ -110,8 +110,7 @@ python hybrid_nids.py --analyze path/to/suricata.json --output results.txt
 │   └── dataset_balancer.py     # Dataset balancing
 ├── suricata/ 
 │   ├── suricata_parser.py
-│   ├── suricata_flows.py
-│   └── suricata_debug.py       # Suricata debugging
+│   └── suricata_flows.py
 ├── telegram/                  # Telegram modules
 │   └── telegram_alert.py
 ├── requirements.txt        # Dependencies

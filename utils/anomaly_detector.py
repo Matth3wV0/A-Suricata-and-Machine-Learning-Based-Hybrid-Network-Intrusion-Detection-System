@@ -1,15 +1,9 @@
-#!/usr/bin/env python3
-"""
-Enhanced Anomaly Detection Module for Hybrid NIDS - ROBUST FIXED VERSION
-"""
-
 import pandas as pd
 import numpy as np
 import json
 import os
-from typing import Dict, List, Any, Tuple
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
+from typing import Dict, Any, Tuple
+
 
 class AnomalyDetector:
     """
@@ -345,6 +339,7 @@ class AnomalyDetector:
         stat_result = self.detect_statistical_anomaly(features)
         
         # Combine scores from both methods
-        combined_score = max(ml_result.get('score', 0), stat_result.get('score', 0))
+        if ml_result.get('is_anomalous', False):
+            combined_score = max(ml_result.get('score', 0), stat_result.get('score', 0))
         
         return ml_result, stat_result, combined_score
