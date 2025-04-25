@@ -339,8 +339,6 @@ class AnomalyDetector:
         stat_result = self.detect_statistical_anomaly(features)
         
         # Combine scores from both methods
-        if ml_result.get('is_anomalous', False):
-            combined_score = max(ml_result.get('score', 0), stat_result.get('score', 0))
-        else:
-            combined_score = 0
+        combined_score = max(ml_result.get('score', 0), stat_result.get('score', 0))
+        
         return ml_result, stat_result, combined_score
