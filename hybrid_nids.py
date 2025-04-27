@@ -728,7 +728,7 @@ class HybridNIDS:
                 port = int(alert_data.get('dst_port', 0) or 0)
                 protocol = alert_data.get('protocol', '').lower()
 
-                if protocol == 'icmp':
+                if protocol == 'ICMP':
                     message += "  • Anomalous ICMP traffic pattern detected\n"
                 else:
                     if port == 22:
