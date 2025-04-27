@@ -726,7 +726,7 @@ class HybridNIDS:
             # Some basic threat heuristics
             try:
                 port = int(alert_data.get('dst_port', 0) or 0)
-                protocol = alert_data.get('protocol', '').lower()
+                protocol = alert_data.get('proto', 'Unknown')
 
                 if protocol == 'ICMP':
                     message += "  • Anomalous ICMP traffic pattern detected\n"
