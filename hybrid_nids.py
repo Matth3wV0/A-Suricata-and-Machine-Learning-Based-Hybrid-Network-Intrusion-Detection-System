@@ -43,7 +43,7 @@ from utils.service_whitelist import ServiceWhitelist
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler('hybrid_nids.log')
@@ -72,7 +72,7 @@ class HybridNIDS:
     that combines signature-based detection with advanced anomaly detection capabilities.
     """
     
-    def __init__(self, model_dir='./model', telegram_enabled=False):
+    def __init__(self, model_dir='./model', telegram_enabled=False, isTrain=False):
         """Initialize the Enhanced Hybrid NIDS."""
         self.model_dir = model_dir
         self.models = None
@@ -109,23 +109,24 @@ class HybridNIDS:
         os.makedirs(model_dir, exist_ok=True)
         
         try:
-            self.load_models()
-            logger.info("Models loaded successfully.")
-            
-            # Initialize anomaly detector
-            self.anomaly_detector = AnomalyDetector(model_dir=model_dir)
-            
-            # Initialize flow finalizer
-            self.flow_finalizer = FlowFinalizer(
-                feature_extractor=self.feature_extractor,
-                anomaly_detector=self.anomaly_detector,
-                alert_callback=self.handle_alert,
-                min_session_duration=0.0,
-                zero_byte_threshold=3,
-                save_results=True,
-                results_file="flow_results.csv"
-            )
-            
+            if not isTrain:
+                self.load_models()
+                logger.info("Models loaded successfully.")
+                
+                # Initialize anomaly detector
+                self.anomaly_detector = AnomalyDetector(model_dir=model_dir)
+                
+                # Initialize flow finalizer
+                self.flow_finalizer = FlowFinalizer(
+                    feature_extractor=self.feature_extractor,
+                    anomaly_detector=self.anomaly_detector,
+                    alert_callback=self.handle_alert,
+                    min_session_duration=0.0,
+                    zero_byte_threshold=3,
+                    save_results=True,
+                    results_file="flow_results.csv"
+                )
+                
         except Exception as e:
             logger.warning(f"Could not load models: {e}")
             self.models = None
@@ -204,9 +205,7 @@ class HybridNIDS:
         baseline = self._create_baseline(X_train_scaled_df[y_train == 0])
         
         self._save_models(dt_model, rf_model, xgb_model, scaler, le, baseline)
-        
-        self.load_models()
-        
+                
         logger.info("Training completed successfully.")
     
     def _verify_labels(self, y_train, is_balanced=True):
@@ -267,8 +266,8 @@ class HybridNIDS:
             numeric_cols = df.select_dtypes(include=['float', 'int']).columns
             for col in numeric_cols:
                 if df[col].isna().sum() > 0:
-                    logger.info(f"Column {col} with NaN or infinite values.")
-                    df[col].fillna(df[col].median(), inplace=True)
+                    print(f"Filling missing values in column {col} with median")
+                    df[col] = df[col].fillna(df[col].median())
         
         # Drop rows that still have NaN values
         df.dropna(inplace=True)
@@ -279,12 +278,8 @@ class HybridNIDS:
             logger.info(f"Removing {n_duplicates} duplicate rows")
             df.drop_duplicates(inplace=True)
         
-        # Convert labels to binary (benign=0, attack=1) if 'Label' exists
-        if 'Label' in df.columns:
-            df['Label'] = np.where((df['Label'] == 'BENIGN') | (df['Label'] == 'benign'), 0, 1)
-        elif 'label' in df.columns:
-            df['Label'] = np.where((df['label'] == 'BENIGN') | (df['label'] == 'benign'), 0, 1)
-            df.drop('label', axis=1, inplace=True)
+        # Convert labels to binary (benign=0, attack=1)
+        df['Label'] = np.where((df['Label'] == 'BENIGN') | (df['Label'] == 'benign'), 0, 1)
         
         logger.info(f"Dataset loaded and preprocessed. Shape: {df.shape}")
         
@@ -731,25 +726,29 @@ class HybridNIDS:
             # Some basic threat heuristics
             try:
                 port = int(alert_data.get('dst_port', 0) or 0)
-                
-                if port == 22:
-                    message += "  • Potential SSH brute force or unauthorized access attempt\n"
-                elif port == 23:
-                    message += "  • Telnet activity - insecure protocol potentially indicating compromise\n"
-                elif port == 3389:
-                    message += "  • RDP connection - potential remote access activity\n"
-                elif port in [80, 443]:
-                    message += "  • HTTP/HTTPS traffic with unusual patterns - potential web attack or data exfiltration\n"
-                elif port == 53:
-                    message += "  • Unusual DNS traffic - potential DNS tunneling or C2 communication\n"
-                elif port == 445 or port == 139:
-                    message += "  • SMB/NetBIOS traffic - potential lateral movement or file access\n"
-                elif port < 1024:
-                    message += "  • Well-known service port with anomalous behavior\n"
-                elif port > 49000:
-                    message += "  • High port communication - potential backdoor or non-standard service\n"
+                protocol = alert_data.get('protocol', '').lower()
+
+                if protocol == 'icmp':
+                    message += "  • Anomalous ICMP traffic pattern detected\n"
                 else:
-                    message += "  • Unusual network traffic patterns detected\n"
+                    if port == 22:
+                        message += "  • Potential SSH brute force or unauthorized access attempt\n"
+                    elif port == 23:
+                        message += "  • Telnet activity - insecure protocol potentially indicating compromise\n"
+                    elif port == 3389:
+                        message += "  • RDP connection - potential remote access activity\n"
+                    elif port in [80, 443]:
+                        message += "  • HTTP/HTTPS traffic with unusual patterns - potential web attack or data exfiltration\n"
+                    elif port == 53:
+                        message += "  • Unusual DNS traffic - potential DNS tunneling or C2 communication\n"
+                    elif port == 445 or port == 139:
+                        message += "  • SMB/NetBIOS traffic - potential lateral movement or file access\n"
+                    elif port < 1024:
+                        message += "  • Well-known service port with anomalous behavior\n"
+                    elif port > 49000:
+                        message += "  • High port communication - potential backdoor or non-standard service\n"
+                    else:
+                        message += "  • Unusual network traffic patterns detected\n"
             except (ValueError, TypeError):
                 message += "  • Unusual network traffic patterns detected\n"
             
@@ -1081,7 +1080,10 @@ def main():
     """Main function."""
     args = parse_args()
     
-    nids = HybridNIDS(model_dir=args.model_dir, telegram_enabled=args.telegram)
+    if args.train:
+        isTrain = True
+    
+    nids = HybridNIDS(model_dir=args.model_dir, telegram_enabled=args.telegram, isTrain=isTrain)
     
     # Execute the selected action
     if args.train:
