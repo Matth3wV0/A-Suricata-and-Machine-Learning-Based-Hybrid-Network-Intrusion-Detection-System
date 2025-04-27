@@ -1082,7 +1082,9 @@ def main():
     
     if args.train:
         isTrain = True
-    
+    else:
+        isTrain = False
+        
     nids = HybridNIDS(model_dir=args.model_dir, telegram_enabled=args.telegram, isTrain=isTrain)
     
     # Execute the selected action
